@@ -11,12 +11,14 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/undead-undead/aagt"
+keywords = ["ai", "agent", "trading", "llm", "framework"]
+categories = ["science", "simulation", "asynchronous"]
 
 [workspace.dependencies]
 # Internal crates
-aagt-core = { path = "aagt-core" }
-aagt-macros = { path = "aagt-macros" }
-aagt-providers = { path = "aagt-providers" }
+aagt-core = { path = "aagt-core", version = "0.1.0" }
+aagt-macros = { path = "aagt-macros", version = "0.1.0" }
+aagt-providers = { path = "aagt-providers", version = "0.1.0" }
 
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
