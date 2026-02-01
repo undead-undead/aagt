@@ -27,7 +27,6 @@ dependencies = [
 name = "aagt-macros"
 version = "0.1.0"
 dependencies = [
- "aagt-core",
  "proc-macro2",
  "quote",
  "serde",
