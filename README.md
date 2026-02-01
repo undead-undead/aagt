@@ -112,11 +112,6 @@ Most frameworks assume you have unlimited budgets for GPUs and SaaS subscription
 
 ---
 
-## Use Cases
-
-### The "Listener" Node
-Deploy a lightweight agent on a $5/mo VPS. It sleeps most of the time, wakes up every hour to check on-chain data, and only burns tokens if it spots an anomaly.
-
 ---
 
 ## Contributing
