@@ -1,6 +1,7 @@
 //! Agent system - the core AI agent abstraction
 
 use std::sync::Arc;
+use tracing::{info, instrument};
 
 use crate::error::{Error, Result};
 use crate::message::Message;
@@ -52,15 +53,25 @@ impl<P: Provider> Agent<P> {
     }
 
     /// Send a prompt and get a response (non-streaming)
+    #[instrument(skip(self, prompt), fields(model = %self.config.model))]
     pub async fn prompt(&self, prompt: impl Into<String>) -> Result<String> {
-        let messages = vec![Message::user(prompt.into())];
+        let prompt_str = prompt.into();
+        info!(prompt_len = prompt_str.len(), "Agent received prompt");
+        
+        let messages = vec![Message::user(prompt_str)];
         self.chat(messages).await
     }
 
     /// Send messages and get a response (non-streaming)
+    #[instrument(skip(self, messages), fields(model = %self.config.model, message_count = messages.len()))]
     pub async fn chat(&self, messages: Vec<Message>) -> Result<String> {
+        info!("Agent starting chat completion");
+        
         let stream = self.stream_chat(messages).await?;
-        stream.collect_text().await
+        let response = stream.collect_text().await?;
+        
+        info!(response_len = response.len(), "Agent completed chat");
+        Ok(response)
     }
 
     /// Stream a prompt response
@@ -85,8 +96,14 @@ impl<P: Provider> Agent<P> {
     }
 
     /// Call a tool by name
+    #[instrument(skip(self, arguments), fields(tool_name = %name))]
     pub async fn call_tool(&self, name: &str, arguments: &str) -> Result<String> {
-        self.tools.call(name, arguments).await
+        info!(args_len = arguments.len(), "Calling tool");
+        
+        let result = self.tools.call(name, arguments).await?;
+        
+        info!(result_len = result.len(), "Tool execution completed");
+        Ok(result)
     }
 
     /// Check if agent has a tool

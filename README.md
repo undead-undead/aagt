@@ -116,6 +116,38 @@ let result = coordinator.orchestrate("Research Rust async trends", workflow).awa
 
 ---
 
+## 🔍 Observability & Tracing
+
+AAGT includes built-in tracing for debugging and monitoring:
+
+```rust
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
+
+// Initialize tracing
+let subscriber = FmtSubscriber::builder()
+    .with_max_level(Level::INFO)
+    .finish();
+tracing::subscriber::set_global_default(subscriber)?;
+
+// All agent operations are automatically traced
+let agent = Agent::builder(provider).build()?;
+let response = agent.prompt("Hello").await?;
+// Logs: "Agent received prompt", "Agent completed chat", etc.
+```
+
+**Features:**
+- ✅ Automatic instrumentation of all agent operations
+- ✅ Performance metrics (execution time, token usage)
+- ✅ Structured logging (JSON format for production)
+- ✅ Zero performance overhead when disabled
+
+**Examples:**
+- [`examples/tracing_agent.rs`](./examples/tracing_agent.rs) - Basic tracing setup
+- [`examples/production_tracing.rs`](./examples/production_tracing.rs) - Production config with log rotation
+
+---
+
 ## 📂 Project Structure
 
 ```
