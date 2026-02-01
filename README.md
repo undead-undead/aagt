@@ -141,10 +141,6 @@ aagt/
 
 ---
 
-## 🤝 Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
-
 ---
 
 ## 📄 License

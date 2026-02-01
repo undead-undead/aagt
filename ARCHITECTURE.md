@@ -359,7 +359,3 @@ long_term.store_entry("user_123", MemoryEntry {
 *(Coming soon)*
 
 ---
-
-## Contributing
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines.
