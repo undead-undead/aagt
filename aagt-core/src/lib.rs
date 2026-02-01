@@ -26,6 +26,7 @@ pub mod provider;
 pub mod rag;
 pub mod risk;
 pub mod simulation;
+pub mod store;
 pub mod strategy;
 pub mod streaming;
 pub mod tool;
