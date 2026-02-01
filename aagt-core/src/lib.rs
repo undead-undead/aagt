@@ -20,6 +20,7 @@ pub mod error;
 pub mod memory;
 pub mod message;
 pub mod multi_agent;
+pub mod notifications;
 pub mod pipeline;
 pub mod provider;
 pub mod rag;
