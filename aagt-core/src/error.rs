@@ -139,6 +139,11 @@ pub enum Error {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
+    // ============ System Errors ============
+    /// IO error
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
     // ============ Generic Errors ============
     /// Internal error
     #[error("Internal error: {0}")]

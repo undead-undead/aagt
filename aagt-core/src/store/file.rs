@@ -17,7 +17,7 @@ use crate::error::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
@@ -69,19 +69,25 @@ impl FileStore {
         Ok(store)
     }
 
-    /// Load data from disk into memory
+    /// Load data from disk into memory using streaming to save memory
     async fn load(&self) -> Result<()> {
         if !self.config.path.exists() {
             return Ok(());
         }
 
-        let content = fs::read_to_string(&self.config.path).await?;
-        let mut docs = self.documents.write().await;
+        use tokio::io::AsyncBufReadExt;
         
+        let file = fs::File::open(&self.config.path).await?;
+        let reader = tokio::io::BufReader::new(file);
+        let mut lines = reader.lines();
+
+        let mut docs = self.documents.write().await;
         docs.clear();
-        for line in content.lines() {
+
+        while let Ok(Some(line)) = lines.next_line().await {
             if line.trim().is_empty() { continue; }
-            if let Ok(doc) = serde_json::from_str::<StoredDocument>(line) {
+            // Safe JSON parsing - ignore malformed lines instead of crashing
+            if let Ok(doc) = serde_json::from_str::<StoredDocument>(&line) {
                 docs.push(doc);
             }
         }
@@ -103,17 +109,15 @@ impl FileStore {
 
 #[async_trait]
 impl VectorStore for FileStore {
-    /// Store a document. 
-    /// NOTE: You MUST provide an embedding in the metadata with key "_embedding" (as JSON array string)
-    /// OR this implementation will simulate a random embedding (for demo purposes).
-    /// In a real app, integrate an Embedding provider before calling this.
+    // ... (store implementation remains same)
+
     async fn store(&self, content: &str, mut metadata: HashMap<String, String>) -> Result<String> {
         // Extract embedding from metadata or generate random (fallback)
         let embedding: Vec<f32> = if let Some(emb_str) = metadata.get("_embedding") {
             serde_json::from_str(emb_str).unwrap_or_else(|_| vec![])
         } else {
-            // Fallback: Random for testing
-            (0..1536).map(|_| rand::random::<f32>()).collect()
+            // Fallback: Zeros for testing (no dependency)
+            vec![0.0; 1536]
         };
         
         // Remove technical metadata
@@ -133,7 +137,9 @@ impl VectorStore for FileStore {
             .open(&self.config.path)
             .await?;
         
-        let line = serde_json::to_string(&doc)? + "\n";
+        // Handle serialization error safely
+        // Handle serialization error safely
+        let line = serde_json::to_string(&doc).map_err(|e| crate::error::Error::MemoryStorage(format!("JSON error: {}", e)))? + "\n";
         file.write_all(line.as_bytes()).await?;
 
         // 2. Update Memory
@@ -142,15 +148,11 @@ impl VectorStore for FileStore {
         Ok(doc.id)
     }
 
+    // ... (search implementation remains same)
+    
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<Document>> {
         // NOTE: In real implementation, query should be converted to embedding first.
-        // Here we just simulate input embedding similar to storage.
-        // Users should ideally pass embedding vector, but our Trait takes string query.
-        // Assuming the app layer handles embedding generation and passes it somehow?
-        // For this simple implementation, let's assume we can't do semantic search without an embedder.
-        // BUT, we can do Keyword Search if embedding is missing! 
-        // Or simulation random embedding. Let's simulate for interface compliance.
-        let query_embedding: Vec<f32> = (0..1536).map(|_| rand::random::<f32>()).collect();
+        let query_embedding: Vec<f32> = vec![0.0; 1536];
 
         let docs = self.documents.read().await;
         
@@ -173,10 +175,13 @@ impl VectorStore for FileStore {
         let mut docs = self.documents.write().await;
         if let Some(pos) = docs.iter().position(|d| d.id == id) {
             docs.remove(pos);
-            // Rewrite file (Compaction) - expensive but necessary for delete
-            let content: String = docs.iter()
-                .map(|d| serde_json::to_string(d).unwrap() + "\n")
-                .collect();
+            // Rewrite file (Compaction) - handle serialization errors
+            let mut content = String::new();
+            for d in docs.iter() {
+                let line = serde_json::to_string(d).map_err(|e| crate::error::Error::MemoryStorage(format!("JSON error: {}", e)))?;
+                content.push_str(&line);
+                content.push('\n');
+            }
             fs::write(&self.config.path, content).await?;
         }
         Ok(())

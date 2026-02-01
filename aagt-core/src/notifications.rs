@@ -3,7 +3,7 @@
 //! This module provides ready-to-use pipeline steps for sending notifications
 //! via Telegram, Discord, and Email (via webhook/API).
 
-use crate::error::Result;
+use anyhow::Result;
 use crate::pipeline::{Context, Step};
 use async_trait::async_trait;
 use serde_json::json;
