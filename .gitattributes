@@ -1,9 +1,12 @@
 # GitHub Linguist overrides
 # Tell GitHub to ignore certain files for language statistics
 
+# Explicitly mark Rust files
+*.rs linguist-language=Rust
+
 # Ignore build artifacts
 target/** linguist-generated
 Cargo.lock linguist-generated
 
-# Mark examples as documentation
-examples/** linguist-documentation
+# Mark examples as documentation (but still count as Rust)
+examples/** linguist-documentation=false
