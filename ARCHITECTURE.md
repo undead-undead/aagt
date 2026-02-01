@@ -1,6 +1,6 @@
 # AAGT Architecture Documentation
 
-**Advanced Autonomous Agent Toolkit - Technical Design**
+**AI Agent Trade - Technical Design**
 
 ---
 

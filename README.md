@@ -1,4 +1,4 @@
-# AAGT (Autonomous Agent Toolkit)
+# AAGT (AI Agent Trade)
 
 **A lightweight, modular, and high-performance framework for building AI Agents in Rust.**
 
