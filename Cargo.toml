@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "aagt-core",
+    "aagt-macros", 
+    "aagt-providers",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/piotrostr/listen"
+
+[workspace.dependencies]
+# Internal crates
+aagt-core = { path = "aagt-core" }
+aagt-macros = { path = "aagt-macros" }
+aagt-providers = { path = "aagt-providers" }
+
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization  
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "stream"] }
+bytes = "1.9"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Utilities
+uuid = { version = "1.12", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6.1"
+parking_lot = "0.12"
+
+# Proc macro
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "parsing"] }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

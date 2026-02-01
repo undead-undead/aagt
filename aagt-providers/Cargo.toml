@@ -1,0 +1,31 @@
+[package]
+name = "aagt-providers"
+description = "LLM provider implementations for the AAGT AI Agent framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["full"]
+full = ["openai", "anthropic", "gemini", "deepseek", "openrouter"]
+openai = []
+anthropic = []
+gemini = []
+deepseek = ["openai"]
+openrouter = ["openai"]
+
+[dependencies]
+aagt-core = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
