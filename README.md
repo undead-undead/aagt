@@ -6,23 +6,23 @@
 
 **AAGT (AI Agent Trade)** is a modular, high-performance Rust framework designed for building autonomous trading agents. 
 
-🚀 **From $5 VPS to Institutional Servers**  
+**From $5 VPS to Institutional Servers**  
 AAGT is built to scale. It runs efficiently on a 1GB RAM budget (using file-based memory) but can scale up to handle complex swarms with vector databases like Qdrant.
 
 ---
 
-## ✨ Key Features
+## Key Features
 
-### 1. ⚡ Ultra-Lightweight & Efficient
+### 1. Ultra-Lightweight & Efficient
 - **Rust Native**: Zero garbage collection pauses, minimal memory footprint.
 - **Resource Optimized**: Runs primarily on `tokio` async runtime.
 - **"Poor Man's" Mode**: Includes `FileStore` (JSONL) and `MarkdownMemory` for running agents on cheap VPS instances without heavy databases.
 
-### 2. 🧠 Hybrid Memory System
+### 2. Hybrid Memory System
 - **Vector Store Interface**: Plug in **Qdrant** for production or use **JSONL files** for local/low-resource setups.
 - **Explicit Memory**: Agents can write Markdown notes (e.g., `trading_log.md`) to reflect on past decisions.
 
-### 3. ⛓️ Execution Pipelines
+### 3. Execution Pipelines
 Build complex trading strategies using a structured pipeline approach:
 ```mermaid
 graph LR
@@ -31,19 +31,19 @@ graph LR
 - **Lazy Execution**: Steps only run when needed (saving tokens and API costs).
 - **Hybrid Logic**: Mix LLM intelligence with hard-coded Rust logic (e.g., rigid risk controls).
 
-### 4. 📣 Built-in Notifications
+### 4. Built-in Notifications
 Zero-cost integration with your favorite platforms:
 - **Telegram** (Bot API)
 - **Discord** (Webhooks)
 - **Email** (via HTTP APIs)
 
-### 5. 🛡️ Trading-First Security
+### 5. Trading-First Security
 - **Panic-Free Core**: Rigorously tested to prevent runtime crashes.
 - **Risk Manager**: Built-in modules to enforce drawdown limits and position sizing.
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
         .add_step(TelegramStep::new(
             "YOUR_BOT_TOKEN",
             "YOUR_CHAT_ID", 
-            "📈 Analysis: {outcome}"
+            "Analysis: {outcome}"
         ));
 
     // 4. Run it!
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 - **`aagt-core`**: The brain. Traits, Pipelines, Memory, and basic Tools.
 - **`aagt-providers`**: LLM integrations (Gemini, OpenAI, DeepSeek, etc.).
@@ -105,14 +105,14 @@ async fn main() -> Result<()> {
 
 ---
 
-## 💡 Philosophy
+## Philosophy
 
 We believe AI trading should be **democratized**. 
 Most frameworks assume you have unlimited budgets for GPUs and SaaS subscriptions. AAGT assumes you might be a student or independent researcher running on a tight budget, but who still demands **professional-grade reliability**.
 
 ---
 
-## use Cases
+## Use Cases
 
 ### 1. The "Listener" Node
 Deploy a lightweight agent on a $5/mo VPS. It sleeps most of the time, wakes up every hour to check on-chain data, and only burns tokens if it spots an anomaly.
@@ -122,10 +122,10 @@ Coordinate multiple agents (Analyst, Trader, Risk Officer) to manage a Moltbook 
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions! Please check out [ARCHITECTURE.md](./ARCHITECTURE.md) to understand the system design before submitting PRs.
 
-## 📄 License
+## License
 
 MIT
