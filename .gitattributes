@@ -1,0 +1,9 @@
+# GitHub Linguist overrides
+# Tell GitHub to ignore certain files for language statistics
+
+# Ignore build artifacts
+target/** linguist-generated
+Cargo.lock linguist-generated
+
+# Mark examples as documentation
+examples/** linguist-documentation
