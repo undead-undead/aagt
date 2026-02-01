@@ -19,8 +19,6 @@ AAGT provides the core abstractions and utilities needed to build complex, multi
 *   **Multi-Agent Coordination (Swarm)**:
     *   **Dynamic Workflows**: Define agent chains dynamically at runtime.
     *   **Role-Based Routing**: Delegate tasks to specialized agents (Researcher, Trader, Risk Analyst).
-*   **Safety First**: Rust-based type safety, thread-safe internals (`Arc`, `DashMap`), and built-in protections against context window overflows.
-*   **Async Native**: Built on `tokio` for high-concurrency performance.
 
 ---
 
@@ -65,29 +63,35 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### 2. Add Custom Tools
+### 2. Add Custom Tools (Web3 Example)
 
 ```rust
 use aagt_core::simple_tool;
 use serde_json::json;
 
 simple_tool!(
-    GetWeather,
-    "get_weather",
-    "Get current weather for a city",
+    SwapToken,
+    "swap_token",
+    "Swap tokens on a DEX (e.g., Jupiter on Solana)",
     {
-        city: ("string", "City name")
+        from_token: ("string", "Token to swap from (e.g., SOL)"),
+        to_token: ("string", "Token to swap to (e.g., USDC)"),
+        amount: ("number", "Amount to swap")
     },
-    [city],
+    [from_token, to_token, amount],
     |args| async move {
-        let city = args["city"].as_str().unwrap();
-        Ok(format!("Weather in {}: Sunny, 25°C", city))
+        let from = args["from_token"].as_str().unwrap();
+        let to = args["to_token"].as_str().unwrap();
+        let amount = args["amount"].as_f64().unwrap();
+        
+        // Call your Web3 swap logic here
+        Ok(format!("Swapped {} {} to {} successfully", amount, from, to))
     }
 );
 
 // Register tool with agent
 let agent = Agent::builder(provider)
-    .tool(Box::new(GetWeather))
+    .tool(Box::new(SwapToken))
     .build()?;
 ```
 
