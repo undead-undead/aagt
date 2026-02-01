@@ -1,94 +1,131 @@
-# AAGT (Advanced Agentic Trading) 架构设计方案
+# AAGT Architecture Documentation
 
-AAGT 是一个专为加密货币交易设计的轻量级、高性能 AI Agent 框架。它通过高度抽象的接口层，将复杂的 LLM 逻辑与具体的交易操作解耦。
+**Advanced Autonomous Agent Toolkit - Technical Design**
 
 ---
 
-## 一、 系统架构概览
+## Table of Contents
 
-AAGT 采用分层架构设计，从底层到顶层分为：适配层、核心抽象层、逻辑执行层。
+1. [Overview](#overview)
+2. [System Architecture](#system-architecture)
+3. [Core Components](#core-components)
+4. [Workflow](#workflow)
+5. [API Reference](#api-reference)
+6. [Design Decisions](#design-decisions)
 
-### 1.1 架构图 (Mermaid)
+---
+
+## Overview
+
+AAGT is a lightweight, high-performance framework for building AI agents in Rust. It provides a modular architecture that separates concerns between LLM providers, agent logic, and tool execution.
+
+### Key Design Principles
+
+- **Modularity**: Clear separation between core abstractions and implementations
+- **Performance**: Async-first design with zero-cost abstractions
+- **Safety**: Leveraging Rust's type system to prevent common errors
+- **Extensibility**: Easy to add new providers, tools, and agent behaviors
+
+---
+
+## System Architecture
+
+### High-Level Architecture
 
 ```mermaid
 graph TD
-    %% 用户应用层
-    subgraph App_Layer [应用层 / listen-kit]
-        UserAgent[Agent Instance]
-        Tools[Custom Tools]
-        Loop[Reasoning Loop]
+    subgraph Application["Application Layer"]
+        UserCode[User Application]
+        CustomTools[Custom Tools]
     end
 
-    %% 核心抽象层
-    subgraph Core_Layer [AAGT Core]
-        AgentStruct[Agent Struct]
-        ToolTrait[Tool Trait]
-        ProviderTrait[Provider Trait]
-        RiskManager[Risk Manager]
-        MemoryMap[Memory System]
+    subgraph Core["AAGT Core"]
+        Agent[Agent Engine]
+        ToolSystem[Tool System]
+        Memory[Memory System]
+        MultiAgent[Multi-Agent Coordinator]
     end
 
-    %% 模型适配层
-    subgraph Provider_Layer [AAGT Providers]
-        OpenAI[OpenAI / DeepSeek]
-        Claude[Anthropic Claude]
+    subgraph Providers["Provider Layer"]
+        OpenAI[OpenAI]
+        Claude[Anthropic]
         Gemini[Google Gemini]
+        DeepSeek[DeepSeek]
         OpenRouter[OpenRouter]
     end
 
-    %% 流程指向
-    UserAgent --> AgentStruct
-    AgentStruct -->|使用| ProviderTrait
-    AgentStruct -->|注册| ToolTrait
-    ProviderTrait <|-- OpenAI
-    ProviderTrait <|-- Claude
-    ProviderTrait <|-- Gemini
-    ProviderTrait <|-- OpenRouter
+    UserCode --> Agent
+    Agent --> ToolSystem
+    Agent --> Memory
+    Agent --> ProviderTrait[Provider Trait]
     
-    Loop -->|检查风险| RiskManager
-    Loop -->|调用| ToolTrait
-    Loop -->|读写| MemoryMap
+    ProviderTrait -.implements.-> OpenAI
+    ProviderTrait -.implements.-> Claude
+    ProviderTrait -.implements.-> Gemini
+    ProviderTrait -.implements.-> DeepSeek
+    ProviderTrait -.implements.-> OpenRouter
+    
+    MultiAgent --> Agent
+    CustomTools -.registers.-> ToolSystem
 ```
 
----
+### Module Breakdown
 
-## 二、 核心模块说明
+#### 1. **aagt-core**
+Core abstractions and business logic.
 
-### 2.1 Agent 引擎 (`aagt-core/agent.rs`)
-Agent 是系统的核心枢纽，负责持有 `Provider` 和 `ToolSet`。
-*   **AgentBuilder**: 采用构建者模式，支持动态注入 Prompt (Preamble)、模型参数（Temperature, Max Tokens）以及工具。
-*   **Chat/Stream 接口**: 统一了普通请求与流式输出接口，适配实时交易场景。
+**Key Files:**
+- `agent.rs` - Agent engine and builder
+- `tool.rs` - Tool trait and registry
+- `provider.rs` - LLM provider interface
+- `memory.rs` - Short-term and long-term memory
+- `multi_agent.rs` - Multi-agent coordination
+- `message.rs` - Message types and content handling
 
-### 2.2 工具系统 (`aagt-core/tool.rs`)
-工具系统采用高度灵活的 Trait 定义：
-*   **Tool Trait**: 要求开发者实现 `name`、`definition` 和 `call`。`definition` 返回标准的 JSON Schema，使代理能准确理解如何传参。
-*   **ToolSet**: 一个线程安全的工具库（使用 `DashMap`），支持在 Agent 运行期间动态管理工具。
+#### 2. **aagt-providers**
+LLM provider implementations.
 
-### 2.3 适配层 (`aagt-providers`)
-将不同 LLM 厂商的 API 差异封装在内部：
-*   **多模型支持**: 原生支持 OpenAI, Claude, Gemini 以及国产主流模型 DeepSeek。
-*   **流式转换**: 将厂商特有的流式协议统一转换为 AAGT 内部的 `StreamingResponse`。
+**Supported Providers:**
+- OpenAI (GPT-4, GPT-3.5)
+- Anthropic (Claude 3.5 Sonnet, Haiku, Opus)
+- Google Gemini (2.0 Flash, 1.5 Pro)
+- DeepSeek
+- OpenRouter (aggregator)
 
-### 2.4 交易增强模块
-*   **Risk (风控)**: 专门设计的 `RiskManager`，可以在 Agent 发出交易指令后、实际执行前介入，进行滑点核对、资金限额检查等。
-*   **Strategy (策略流水线)**: 将 AI 的决策转化为 `Condition -> Action` 的链式操作，支持自动化定投、抄底等复杂指令。
+#### 3. **aagt-macros**
+Procedural macros for developer convenience.
 
----
-
-## 三、 核心工作流程 (Reasoning Loop)
-
-1.  **用户输入**: 用户发送交易指令（如 "帮我买入 100 刀的 SOL"）。
-2.  **模型推理**: Agent 将指令与工具定义发送给 LLM，LLM 判断需要调用 `swap` 工具。
-3.  **工具解析**: Agent 解析 LLM 返回的 `ToolCall` 参数。
-4.  **安全评估**: `RiskManager` 对参数进行扫描（例如：买入金额是否超过单笔上限）。
-5.  **驱动执行**: 调用具体的 Rust 实现（如 `solana-sdk`）执行链上操作。
-6.  **反馈闭环**: 交易结果返回给 LLM，由 LLM 生成最终的自然语言回复。
+**Macros:**
+- `simple_tool!` - Define tools with minimal boilerplate
 
 ---
 
-## 四、 核心接口定义 (Rust 参考)
+## Core Components
 
-### Tool Trait
+### 1. Agent Engine
+
+The `Agent` struct is the central orchestrator.
+
+**Responsibilities:**
+- Manage conversation history
+- Route requests to LLM providers
+- Execute tool calls
+- Handle streaming responses
+
+**Key Methods:**
+```rust
+impl<P: Provider> Agent<P> {
+    pub fn builder(provider: P) -> AgentBuilder<P>;
+    pub async fn prompt(&self, input: &str) -> Result<String>;
+    pub async fn stream(&self, input: &str) -> Result<impl Stream<Item = String>>;
+}
+```
+
+### 2. Tool System
+
+Tools are the primary way agents interact with the external world.
+
+**Tool Trait:**
 ```rust
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -98,7 +135,16 @@ pub trait Tool: Send + Sync {
 }
 ```
 
-### Provider Trait
+**Tool Registry:**
+- Thread-safe storage using `DashMap`
+- Dynamic tool registration/removal
+- Automatic JSON schema generation
+
+### 3. Provider Interface
+
+Unified interface for all LLM providers.
+
+**Provider Trait:**
 ```rust
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -108,22 +154,212 @@ pub trait Provider: Send + Sync {
         system_prompt: Option<&str>,
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
-        // ... 其他参数
+        config: CompletionConfig,
     ) -> Result<StreamingResponse>;
 }
 ```
 
+**Streaming Response:**
+```rust
+pub enum StreamingChoice {
+    Delta(String),
+    ToolCall { id: String, name: String, arguments: String },
+    ParallelToolCalls(HashMap<usize, ToolCall>),
+    Done,
+}
+```
+
+### 4. Memory System
+
+Two-tier memory architecture:
+
+**Short-Term Memory:**
+- Ring buffer for recent conversation
+- Configurable capacity (default: 20 messages)
+- Per-user isolation
+
+**Long-Term Memory:**
+- Vector-store integration ready
+- Token-aware retrieval
+- Automatic cleanup of stale data
+
+**API:**
+```rust
+impl ShortTermMemory {
+    pub fn add(&self, user_id: &str, message: Message);
+    pub fn get_recent(&self, user_id: &str, limit: usize) -> Vec<Message>;
+}
+
+impl LongTermMemory {
+    pub fn store_entry(&self, user_id: &str, entry: MemoryEntry);
+    pub fn retrieve_recent(&self, user_id: &str, limit: usize, char_limit: usize) -> Vec<MemoryEntry>;
+}
+```
+
+### 5. Multi-Agent Coordination
+
+Swarm-based architecture for complex workflows.
+
+**Coordinator:**
+```rust
+impl Coordinator {
+    pub fn register(&mut self, role: AgentRole, agent: Arc<dyn MultiAgent>);
+    pub async fn orchestrate(&self, task: &str, workflow: Vec<AgentRole>) -> Result<String>;
+}
+```
+
+**Workflow Example:**
+```
+User Request → Researcher → Risk Analyst → Trader → Response
+```
+
 ---
 
-## 五、 为什么选择 AAGT？
+## Workflow
 
-1.  **高性能**: 基于 Rust 语言，利用 `async/await` 实现高并发，适合实时盯盘机器人。
-2.  **交易原生**: 不同于通用的 AI 框架，AAGT 内置了模拟交易（Simulation）、风控（Risk）和策略流水线（Strategy）。
-3.  **极简迁移**: 通过 `define_tool!` 宏，开发者可以在几分钟内将现有的 Rust 函数转化为 AI 可调用的工具。
+### Standard Request Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Agent
+    participant Provider
+    participant Tool
+
+    User->>Agent: prompt("Buy 100 SOL")
+    Agent->>Provider: stream_completion(messages, tools)
+    Provider-->>Agent: ToolCall(swap, {amount: 100, token: "SOL"})
+    Agent->>Tool: call(swap, args)
+    Tool-->>Agent: "Success: Swapped 100 SOL"
+    Agent->>Provider: stream_completion(with tool result)
+    Provider-->>Agent: Delta("I've purchased 100 SOL for you")
+    Agent-->>User: "I've purchased 100 SOL for you"
+```
+
+### Multi-Agent Workflow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Coordinator
+    participant Researcher
+    participant RiskAnalyst
+    participant Trader
+
+    User->>Coordinator: orchestrate("Buy low-risk token", [Researcher, RiskAnalyst, Trader])
+    Coordinator->>Researcher: process("Find low-risk tokens")
+    Researcher-->>Coordinator: "SOL, ETH, BTC"
+    Coordinator->>RiskAnalyst: process("Analyze: SOL, ETH, BTC")
+    RiskAnalyst-->>Coordinator: "SOL: Low risk, ETH: Medium, BTC: Low"
+    Coordinator->>Trader: process("Buy SOL")
+    Trader-->>Coordinator: "Purchased 50 SOL"
+    Coordinator-->>User: "Purchased 50 SOL (low risk)"
+```
 
 ---
 
-## 六、 未来规划
+## API Reference
 
-*   **多代理协作 (Swarm)**: 允许研究员 Agent、风控 Agent 和交易员 Agent 协同工作。
-*   **长期记忆库**: 集成向量数据库，使 Agent 能够记住用户的交易偏好和历史策略表现。
+### Agent Builder
+
+```rust
+let agent = Agent::builder(provider)
+    .model("gpt-4")
+    .preamble("You are a trading assistant")
+    .temperature(0.7)
+    .max_tokens(2000)
+    .tool(Box::new(SwapTool))
+    .build()?;
+```
+
+### Tool Definition
+
+```rust
+use aagt_core::simple_tool;
+
+simple_tool!(
+    FetchPrice,
+    "fetch_price",
+    "Get current price of a token",
+    {
+        symbol: ("string", "Token symbol (e.g., SOL, ETH)")
+    },
+    [symbol],
+    |args| async move {
+        let symbol = args["symbol"].as_str().unwrap();
+        let price = fetch_from_api(symbol).await?;
+        Ok(format!("${}", price))
+    }
+);
+```
+
+### Memory Usage
+
+```rust
+use aagt_core::memory::{ShortTermMemory, LongTermMemory};
+
+let short_term = ShortTermMemory::new(20);
+short_term.add("user_123", Message::user("Hello"));
+
+let long_term = LongTermMemory::new(1000);
+long_term.store_entry("user_123", MemoryEntry {
+    content: "User prefers low-risk trades".to_string(),
+    timestamp: Utc::now(),
+});
+```
+
+---
+
+## Design Decisions
+
+### Why Rust?
+
+1. **Performance**: Zero-cost abstractions and no garbage collection
+2. **Safety**: Compile-time guarantees prevent data races and null pointer errors
+3. **Concurrency**: First-class async/await support via Tokio
+4. **Ecosystem**: Rich crate ecosystem for HTTP, JSON, and crypto operations
+
+### Why Trait-Based Design?
+
+- **Flexibility**: Easy to swap LLM providers without changing agent code
+- **Testability**: Mock providers for unit testing
+- **Extensibility**: Users can implement custom providers
+
+### Why DashMap for Tool Registry?
+
+- **Thread-Safe**: Lock-free concurrent access
+- **Performance**: Faster than `RwLock<HashMap>` for read-heavy workloads
+- **Simplicity**: No manual lock management
+
+### Memory Management Strategy
+
+**Short-Term Memory:**
+- Ring buffer prevents unbounded growth
+- Per-user isolation via `DashMap<String, VecDeque>`
+
+**Long-Term Memory:**
+- Sorted by timestamp for efficient retrieval
+- Character limit prevents context window overflow
+- Future: Integration with vector databases (Qdrant, Pinecone)
+
+---
+
+## Future Roadmap
+
+- [ ] Vector database integration for semantic memory search
+- [ ] Built-in observability (OpenTelemetry traces)
+- [ ] Agent composition patterns (pipelines, DAGs)
+- [ ] Fine-tuning support for custom models
+- [ ] Web UI for agent monitoring
+
+---
+
+## Performance Benchmarks
+
+*(Coming soon)*
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines.

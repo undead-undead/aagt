@@ -2,7 +2,12 @@
 
 **A lightweight, modular, and high-performance framework for building AI Agents in Rust.**
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
+
 AAGT provides the core abstractions and utilities needed to build complex, multi-agent systems with minimal overhead. It is designed to be flexible, safe, and easy to extend.
+
+---
 
 ## 🚀 Features
 
@@ -17,39 +22,25 @@ AAGT provides the core abstractions and utilities needed to build complex, multi
 *   **Safety First**: Rust-based type safety, thread-safe internals (`Arc`, `DashMap`), and built-in protections against context window overflows.
 *   **Async Native**: Built on `tokio` for high-concurrency performance.
 
-## 📦 Architecture
+---
 
-```mermaid
-graph TD
-    A[Agent] --> P[Provider Trait]
-    A --> T[ToolSet]
-    A --> M[Memory System]
-    
-    P --> |Impl| OpenAI
-    P --> |Impl| Gemini
-    P --> |Impl| Anthropic
-    
-    T --> |Contains| Tool1
-    T --> |Contains| Tool2
-    
-    Coordinate[Coordinator] --> |Manages| A
-    Coordinate --> |Routes| Message
-```
+## 📦 Installation
 
-## 🛠️ Usage
-
-### 1. Installation
-
-Add `aagt` to your `Cargo.toml`:
+Add AAGT to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-aagt-core = { path = "aagt-core" }
-aagt-providers = { path = "aagt-providers" }
+aagt-core = { git = "https://github.com/undead-undead/aagt", package = "aagt-core" }
+aagt-providers = { git = "https://github.com/undead-undead/aagt", package = "aagt-providers" }
 tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
 ```
 
-### 2. Create a Simple Agent
+---
+
+## 🛠️ Quick Start
+
+### 1. Create a Simple Agent
 
 ```rust
 use aagt_core::prelude::*;
@@ -74,17 +65,43 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+### 2. Add Custom Tools
+
+```rust
+use aagt_core::simple_tool;
+use serde_json::json;
+
+simple_tool!(
+    GetWeather,
+    "get_weather",
+    "Get current weather for a city",
+    {
+        city: ("string", "City name")
+    },
+    [city],
+    |args| async move {
+        let city = args["city"].as_str().unwrap();
+        Ok(format!("Weather in {}: Sunny, 25°C", city))
+    }
+);
+
+// Register tool with agent
+let agent = Agent::builder(provider)
+    .tool(Box::new(GetWeather))
+    .build()?;
+```
+
 ### 3. Multi-Agent Swarm
 
 ```rust
 use aagt_core::multi_agent::{Coordinator, AgentRole};
 
 // Initialize Coordinator
-let coordinator = Coordinator::new();
+let mut coordinator = Coordinator::new();
 
 // Register Agents
-coordinator.register(researcher_agent);
-coordinator.register(writer_agent);
+coordinator.register(AgentRole::Researcher, researcher_agent);
+coordinator.register(AgentRole::Assistant, writer_agent);
 
 // Define Workflow: Research -> Write
 let workflow = vec![AgentRole::Researcher, AgentRole::Assistant];
@@ -93,12 +110,49 @@ let workflow = vec![AgentRole::Researcher, AgentRole::Assistant];
 let result = coordinator.orchestrate("Research Rust async trends", workflow).await?;
 ```
 
+---
+
 ## 📂 Project Structure
 
-*   `aagt-core`: Core interfaces (Agent, Provider, Tool, Memory, MultiAgent).
-*   `aagt-providers`: Implementations for various LLMs.
-*   `aagt-macros`: Helper macros for defining tools easily.
+```
+aagt/
+├── aagt-core/          # Core interfaces (Agent, Provider, Tool, Memory, MultiAgent)
+├── aagt-providers/     # LLM provider implementations (OpenAI, Gemini, Claude, etc.)
+├── aagt-macros/        # Helper macros for defining tools
+├── ARCHITECTURE.md     # Detailed architecture documentation
+└── README.md           # This file
+```
+
+---
+
+## 🌟 Why AAGT?
+
+1.  **High Performance**: Rust-based with `async/await` for high concurrency.
+2.  **Trading Native**: Built-in simulation, risk management, and strategy pipelines.
+3.  **Easy Migration**: Use `simple_tool!` macro to convert existing Rust functions into AI-callable tools in minutes.
+4.  **Production Ready**: Thread-safe, memory-efficient, and battle-tested in real trading scenarios.
+
+---
+
+## 📖 Documentation
+
+- [Architecture Guide](./ARCHITECTURE.md) - Detailed system design and component overview
+- [API Reference](https://docs.rs/aagt-core) - Full API documentation (coming soon)
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
+
+---
 
 ## 📄 License
 
-MIT
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 🙏 Acknowledgments
+
+Built with ❤️ using Rust and inspired by the need for high-performance AI agents in trading environments.
