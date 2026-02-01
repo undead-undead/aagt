@@ -134,6 +134,29 @@ aagt/
 
 ---
 
+---
+
+## 💡 Use Cases
+
+### Trading Bots
+Build autonomous trading agents with built-in risk management and strategy execution.
+
+### Social Media Agents
+Create agents that interact with social platforms like [Moltbook](https://moltbook.com):
+- Auto-post market insights
+- Engage with community discussions
+- Monitor sentiment and trends
+
+**Example:** See [`examples/moltbook_agent.rs`](./examples/moltbook_agent.rs) for a complete social media agent implementation.
+
+### Research Assistants
+Deploy multi-agent swarms where specialized agents collaborate on complex research tasks.
+
+### Customer Support
+Build conversational agents with long-term memory to provide personalized support.
+
+---
+
 ## 📖 Documentation
 
 - [Architecture Guide](./ARCHITECTURE.md) - Detailed system design and component overview
