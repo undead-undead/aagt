@@ -114,11 +114,8 @@ Most frameworks assume you have unlimited budgets for GPUs and SaaS subscription
 
 ## Use Cases
 
-### 1. The "Listener" Node
+### The "Listener" Node
 Deploy a lightweight agent on a $5/mo VPS. It sleeps most of the time, wakes up every hour to check on-chain data, and only burns tokens if it spots an anomaly.
-
-### 2. The Social Swarm
-Coordinate multiple agents (Analyst, Trader, Risk Officer) to manage a Moltbook account, posting high-quality automated analysis based on real market moves.
 
 ---
 
