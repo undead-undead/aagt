@@ -53,9 +53,9 @@ graph TD
     end
 
     subgraph Infrastructure["Infrastructure Layer"]
-        FileStore[FileStore (JSONL)]
-        VectorDB[Qdrant (Optional)]
-        Tracing[Tracing & Logs]
+        FileStore["FileStore (JSONL)"]
+        VectorDB["Qdrant (Optional)"]
+        Tracing["Tracing & Logs"]
     end
 
     UserStrategies --> Pipeline
