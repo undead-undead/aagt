@@ -178,3 +178,16 @@ let risk_manager = RiskManager::with_config(config, store);
 ## ⚠️ Disclaimer
 
 This software is for educational and research purposes. Cryptocurrency trading involves significant risk. The authors are not responsible for financial losses. Always test strategies in simulation mode first.
+
+---
+
+## ☕ Support
+
+If you think the project is good, you can support the developers.  
+https://buymeacoffee.com/undeadundead
+
+**Crypto:**
+
+- **Sol**: `9QFKQ3jpBSuNPLZQH1uq5GrJm4RDKue82zeVaXwazcmj`
+- **Base**: `0x4cf0b79aea1c229dfb1df9e2b40ea5dd04f37969`
+
