@@ -144,7 +144,65 @@ impl LongTermMemory {
         // A periodic cleanup task is better.
         
         self.store.store(&entry.content, metadata).await?;
+        
+        // Fix #2: Probabilistic Cleanup
+        // To avoid overhead on every write, check cleanup 5% of the time
+        // or just rely on a separate task. Here we do simple probabilistic check.
+        if fastrand::usize(..100) < 5 {
+            self.prune(self.max_entries, entry.user_id.clone(), agent_id.map(|s| s.to_string())).await;
+        }
+        
         Ok(())
+    }
+
+    /// Prune old entries if exceeding limit
+    pub async fn prune(&self, limit: usize, user_id: String, agent_id: Option<String>) {
+        let store = self.store.clone();
+        let uid = user_id.clone();
+        let aid = agent_id.clone();
+        
+        tokio::spawn(async move {
+            // Find all IDs for this user/agent
+            let uid_filter = uid.clone();
+            let aid_filter = aid.clone();
+            
+            // We need timestamp to sort, so we can't just use find_ids.
+            // We need to fetch metadata at least.
+            // FileStore::find returns Documents which contain metadata.
+            let docs = store.find(move |idx| {
+                if idx.get_metadata("user_id") != Some(&uid_filter) { return false; }
+                if let Some(ref target_aid) = aid_filter {
+                    if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
+                }
+                true
+            }).await;
+
+            if docs.len() <= limit {
+                return;
+            }
+
+            // Parse timestamps and sort
+            let mut entries: Vec<(String, i64)> = docs.into_iter().filter_map(|d| {
+                let ts = d.metadata.get("timestamp")?.parse::<i64>().ok()?;
+                Some((d.id, ts))
+            }).collect();
+
+            // Sort: Oldest first (ascending timestamp)
+            entries.sort_by_key(|k| k.1);
+
+            // Determine how many to delete
+            let to_remove = entries.len().saturating_sub(limit);
+            if to_remove > 0 {
+                // Delete oldest
+                for (id, _) in entries.into_iter().take(to_remove) {
+                    store.delete(&id).await.ok();
+                }
+                // Trigger compaction if we deleted a lot
+                if to_remove > 100 {
+                     store.auto_compact(limit).await.ok();
+                }
+            }
+        });
     }
 
     /// Retrieve entries by tag with optional agent isolation
@@ -248,7 +306,7 @@ impl Memory for LongTermMemory {
          tracing::warn!("LongTermMemory::store(Message) not implemented directly. Use store_entry.");
     }
 
-    fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
+    fn retrieve(&self, _user_id: &str, _agent_id: Option<&str>, _limit: usize) -> Vec<Message> {
          // This is a bit of a hack to map MemoryEntry -> Message for trait compliance if needed.
          // But usually LongTermMemory is used explicitly.
          // For now, we return empty or implement basic mapping.
@@ -390,5 +448,45 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Just SOL");
+    }
+
+    #[tokio::test]
+    async fn test_long_term_memory_pruning() {
+        let path = PathBuf::from("test_memory_pruning.jsonl");
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+        // Limit 10
+        let memory = LongTermMemory::new(10, path.clone()).await.unwrap();
+
+        // Insert 15 items
+        for i in 0..15 {
+             memory.store_entry(MemoryEntry {
+                id: format!("{}", i),
+                user_id: "user1".to_string(),
+                content: format!("Content {}", i),
+                timestamp: 1000 + i, // ascending timestamp
+                tags: vec![],
+                relevance: 1.0,
+            }, None).await.unwrap();
+        }
+
+        // Force prune (since store_entry is probabilistic)
+        memory.prune(10, "user1".to_string(), None).await;
+        
+        // Wait for async prune
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let all = memory.retrieve_recent("user1", None, 10000).await;
+        
+        assert!(all.len() <= 10, "Should have pruned to <= 10, got {}", all.len());
+        
+        // Oldest (0..4) should be gone, Newest (5..14) should remain
+        // Check if "Content 14" is present
+        assert!(all.iter().any(|e| e.content == "Content 14"));
+        // Check if "Content 0" is missing
+        assert!(!all.iter().any(|e| e.content == "Content 0"));
+
+        let _ = std::fs::remove_file(&path);
     }
 }

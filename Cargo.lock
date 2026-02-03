@@ -12,6 +12,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
+ "fastrand",
  "futures",
  "parking_lot",
  "rayon",

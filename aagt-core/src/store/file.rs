@@ -504,12 +504,18 @@ impl FileStore {
         }
         
         // REOPEN READER (Critical Fix)
+        // Perform blocking I/O on a separate thread to avoid freezing the executor
+        let path = self.config.path.clone();
+        let new_file_handle = tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .map_err(|e| Error::MemoryStorage(format!("Failed to reopen file after compaction: {}", e)))
+        }).await.map_err(|e| Error::Internal(format!("Join error: {}", e)))??;
+
         {
             if let Ok(mut reader) = self.reader.write() {
-                *reader = std::fs::OpenOptions::new()
-                    .read(true)
-                    .open(&self.config.path)
-                    .map_err(|e| Error::MemoryStorage(format!("Failed to reopen file after compaction: {}", e)))?;
+                *reader = new_file_handle;
             }
         }
 
