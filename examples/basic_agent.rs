@@ -1,12 +1,15 @@
 /// Basic example of creating and using an AAGT agent
 /// 
 /// This example demonstrates:
-/// - Creating a Gemini provider
-/// - Building an agent with custom configuration
+/// - Creating an OpenAI provider (standard for AAGT)
+/// - Building an agent with custom configuration using the builder pattern
 /// - Simple prompt-response interaction
+///
+/// Prerequisite:
+/// - Set `OPENAI_API_KEY` in your environment or .env file
 
 use aagt_core::prelude::*;
-use aagt_providers::gemini::{Gemini, GEMINI_2_0_FLASH};
+use aagt_providers::openai::{OpenAI, GPT_4O};
 use anyhow::Result;
 
 #[tokio::main]
@@ -14,12 +17,12 @@ async fn main() -> Result<()> {
     // Initialize tracing for logs
     tracing_subscriber::fmt::init();
 
-    // 1. Create provider (requires GEMINI_API_KEY env var)
-    let provider = Gemini::from_env()?;
+    // 1. Create provider (requires OPENAI_API_KEY env var)
+    let provider = OpenAI::from_env()?;
 
     // 2. Build agent with configuration
     let agent = Agent::builder(provider)
-        .model(GEMINI_2_0_FLASH)
+        .model(GPT_4O)
         .preamble("You are a helpful AI assistant.")
         .temperature(0.7)
         .max_tokens(1000)

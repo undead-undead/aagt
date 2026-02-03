@@ -12,7 +12,7 @@
 /// - Or the agent will auto-register on first run
 
 use aagt_core::{prelude::*, simple_tool};
-use aagt_providers::gemini::{Gemini, GEMINI_2_0_FLASH};
+use aagt_providers::openai::{OpenAI, GPT_4O};
 use anyhow::Result;
 use serde_json::{json, Value};
 
@@ -177,11 +177,11 @@ async fn main() -> Result<()> {
         println!("💡 The agent can register itself, or you can set the key manually.\n");
     }
 
-    let provider = Gemini::from_env()?;
+    let provider = OpenAI::from_env()?;
 
     // Build agent with Moltbook tools
     let agent = Agent::builder(provider)
-        .model(GEMINI_2_0_FLASH)
+        .model(GPT_4O)
         .preamble(
             "You are a social media agent on Moltbook. \
             You can register, post content, read the feed, and upvote interesting posts. \
