@@ -9,7 +9,7 @@ AAGT is built to scale. It runs efficiently on a 1GB RAM budget (using file-base
 
 ---
 
-## � Key Features
+## Key Features
 
 ### 1. Ultra-Lightweight & Efficient
 - **Rust Native**: Zero garbage collection pauses, minimal memory footprint.
@@ -43,7 +43,7 @@ Zero-cost integration with your favorite platforms:
 
 ---
 
-## �🏗 Architecture
+## Architecture
 
 The project is structured as a Cargo workspace:
 
