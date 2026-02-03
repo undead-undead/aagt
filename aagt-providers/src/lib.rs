@@ -12,6 +12,7 @@ pub use aagt_core::streaming::{StreamingChoice, StreamingResponse};
 pub use aagt_core::tool::ToolDefinition;
 
 pub mod mock;
+pub mod utils;
 
 #[cfg(feature = "openai")]
 pub mod openai;

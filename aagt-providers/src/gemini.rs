@@ -277,17 +277,18 @@ fn parse_gemini_stream<S>(
 where
     S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + Unpin + 'static,
 {
-    let buffer = String::new();
+    let sse_buffer = crate::utils::SseBuffer::new();
+    let string_buffer = String::new();
     let tool_call_counter: usize = 0;
 
     futures::stream::unfold(
-        (stream, buffer, tool_call_counter),
-        move |(mut stream, mut buffer, mut tool_counter)| async move {
+        (stream, sse_buffer, string_buffer, tool_call_counter),
+        move |(mut stream, mut bytes_buffer, mut text_buffer, mut tool_counter)| async move {
             loop {
                 // Try to extract complete SSE message
-                if let Some(pos) = buffer.find("\n\n") {
-                    let line = buffer[..pos].to_string();
-                    buffer = buffer[pos + 2..].to_string();
+                if let Some(pos) = text_buffer.find("\n\n") {
+                    let line = text_buffer[..pos].to_string();
+                    text_buffer = text_buffer[pos + 2..].to_string();
 
                     if let Some(data) = line.strip_prefix("data: ") {
                         match serde_json::from_str::<StreamChunk>(data) {
@@ -298,7 +299,7 @@ where
                                         if candidate.finish_reason.as_deref() == Some("STOP") {
                                             return Some((
                                                 Ok(StreamingChoice::Done),
-                                                (stream, buffer, tool_counter),
+                                                (stream, bytes_buffer, text_buffer, tool_counter),
                                             ));
                                         }
 
@@ -308,9 +309,9 @@ where
                                                     match part {
                                                         ResponsePart::Text { text } => {
                                                             if !text.is_empty() {
-                                                                return Some((
+                                                                 return Some((
                                                                     Ok(StreamingChoice::Message(text.clone())),
-                                                                    (stream, buffer, tool_counter),
+                                                                    (stream, bytes_buffer, text_buffer, tool_counter),
                                                                 ));
                                                             }
                                                         }
@@ -322,14 +323,14 @@ where
                                                                     name: function_call.name.clone(),
                                                                     arguments: function_call.args.clone(),
                                                                 }),
-                                                                (stream, buffer, tool_counter),
+                                                                (stream, bytes_buffer, text_buffer, tool_counter),
                                                             ));
                                                         }
                                                         ResponsePart::Thought { thought } => {
                                                             if !thought.is_empty() {
                                                                 return Some((
                                                                     Ok(StreamingChoice::Thought(thought.clone())),
-                                                                    (stream, buffer, tool_counter),
+                                                                    (stream, bytes_buffer, text_buffer, tool_counter),
                                                                 ));
                                                             }
                                                         }
@@ -351,12 +352,14 @@ where
                 // Need more data
                 match stream.next().await {
                     Some(Ok(bytes)) => {
-                        match String::from_utf8(bytes.to_vec()) {
-                            Ok(s) => buffer.push_str(&s),
+                        match bytes_buffer.push_and_get_text(&bytes) {
+                            Ok(new_text) => {
+                                text_buffer.push_str(&new_text);
+                            }
                             Err(e) => {
                                 return Some((
-                                    Err(Error::StreamInterrupted(e.to_string())),
-                                    (stream, buffer, tool_counter),
+                                    Err(e),
+                                    (stream, bytes_buffer, text_buffer, tool_counter),
                                 ));
                             }
                         }
@@ -364,7 +367,7 @@ where
                     Some(Err(e)) => {
                         return Some((
                             Err(Error::Http(e)),
-                            (stream, buffer, tool_counter),
+                            (stream, bytes_buffer, text_buffer, tool_counter),
                         ));
                     }
                     None => return None,

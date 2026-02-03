@@ -126,8 +126,13 @@ impl Pipeline {
     /// Execute the pipeline
     #[instrument(skip(self, input), fields(pipeline = %self.name))]
     pub async fn run(&self, input: impl Into<String>) -> Result<Context> {
-        let mut ctx = Context::new(input);
-        
+        let ctx = Context::new(input);
+        self.run_with_context(ctx).await
+    }
+
+    /// Execute the pipeline with a pre-populated context
+    #[instrument(skip(self, ctx), fields(pipeline = %self.name))]
+    pub async fn run_with_context(&self, mut ctx: Context) -> Result<Context> {
         info!("Pipeline started");
         ctx.log(format!("Pipeline '{}' started", self.name));
 

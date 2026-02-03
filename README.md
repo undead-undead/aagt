@@ -1,17 +1,17 @@
-# AAGT: High-Performance AI Agent Framework for Trading
+# AAGT - AI Agent Framework for Trading
 
 [![Crates.io](https://img.shields.io/crates/v/aagt-core.svg)](https://crates.io/crates/aagt-core)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Build Status](https://github.com/undead-undead/aagt/workflows/CI/badge.svg)](https://github.com/undead-undead/aagt/actions)
 
-**AAGT (AI Agent Trade)** is a modular, high-performance Rust framework designed for building autonomous trading agents. 
+**AAGT (AI Agent Trade)** is a robust, modular, and secure framework for building autonomous trading agents. 
 
 **From $5 VPS to Institutional Servers**  
-AAGT is built to scale. It runs efficiently on a 1GB RAM budget (using file-based memory) but can scale up to handle complex swarms with vector databases like Qdrant.
+AAGT is built to scale. It runs efficiently on a 1GB RAM budget (using file-based memory) but can scale up to handle complex swarms with vector databases like Qdrant. AAGT leverages Rust's safety and performance to manage multiple agents with strict risk controls.
 
 ---
 
-## Key Features
+## � Key Features
 
 ### 1. Ultra-Lightweight & Efficient
 - **Rust Native**: Zero garbage collection pauses, minimal memory footprint.
@@ -37,87 +37,138 @@ Zero-cost integration with your favorite platforms:
 - **Discord** (Webhooks)
 - **Email** (via HTTP APIs)
 
-### 5. Trading-First Security
-- **Panic-Free Core**: Rigorously tested to prevent runtime crashes.
-- **Risk Manager**: Built-in modules to enforce drawdown limits and position sizing.
+---
+
+## �🏗 Architecture
+
+The project is structured as a Cargo workspace:
+
+- **`aagt-core`**: The heart of the framework.
+    - **Agent System**: `Agent` and `MultiAgent` abstractions for single or coordinated agent workflows.
+    - **Risk Management**: `RiskManager` using the Actor model to ensure thread-safe, durable state management.
+    - **Pipeline Engine**: `StrategyEngine` for executing conditional trading logic (Conditions -> Actions).
+    - **Memory**: Short-term (RAM) and Long-term (Vector Store/JSON) memory systems.
+- **`aagt-providers`**: Integrations for LLMs (OpenAI, Gemini, DeepSeek, etc.).
+- **`aagt-macros`**: Procedural macros to simplify tool creation.
+
+### Technical Highlights
+- **Actors**: Components like `RiskManager` use an actor pattern (channels) to manage state without locks, ensuring high concurrency.
+- **Dynamic Strategies**: Strategies are defined as data (JSON), allowing dynamic reloading without recompilation.
+- **Explicit Tools**: Capabilities are explicit and self-describing via `Tool` traits.
 
 ---
 
-## Quick Start
+## 🛡 Security Review
 
-### Installation
+Security is a first-class citizen for automated trading in AAGT:
 
-Add to your `Cargo.toml`:
+1.  **Risk Management Loop**:
+    - Every trade action must pass through the `RiskManager`.
+    - **Stateless Checks**: Max single trade size, max slippage, min liquidity, rug pull detection.
+    - **Stateful Checks**: Max daily volume limits. State is persisted durably to disk (JSON).
+    - **Actor Isolation**: Risk state is managed by a dedicated actor preventing race conditions.
 
-```toml
-[dependencies]
-aagt-core = { git = "https://github.com/undead-undead/aagt" }
-aagt-providers = { git = "https://github.com/undead-undead/aagt" }
-tokio = { version = "1", features = ["full"] }
+2.  **Environment Security**:
+    - API Keys (e.g., `OPENAI_API_KEY`) are loaded strictly from environment variables. **DO NOT** hardcode secrets.
+
+3.  **Operations**:
+    - **File-based persistence** (FileStore) ensures data ownership remains on your server.
+
+---
+
+## 🚀 Deployment (VPS Guide)
+
+Recommended setup for a single-user VPS deployment running multiple agents.
+
+### Prerequisites
+- **Rust**: Install via `rustup`.
+- **Systemd**: For process management.
+
+### Installation & Setup
+
+1.  **Clone the repository**:
+    ```bash
+    git clone https://github.com/undead-undead/aagt.git
+    cd aagt
+    ```
+
+2.  **Configuration**:
+    Create a `.env` file in the root:
+    ```bash
+    OPENAI_API_KEY=sk-proj-....
+    RUST_LOG=info
+    ```
+
+3.  **Build a Runner**:
+    ```bash
+    cargo build --release --example basic_agent
+    ```
+
+### Running as a Service (Systemd)
+
+Create `/etc/systemd/system/aagt.service`:
+
+```ini
+[Unit]
+Description=AAGT Trading Agents
+After=network.target
+
+[Service]
+User=your_user
+WorkingDirectory=/home/your_user/aagt
+ExecStart=/home/your_user/aagt/target/release/examples/basic_agent
+Restart=always
+EnvironmentFile=/home/your_user/aagt/.env
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-### Example: A Low-Resource Trading Agent
+Enable and start:
+```bash
+sudo systemctl enable aagt
+sudo systemctl start aagt
+```
 
-This agent analyzes the market, checks risk, and notifies you contextually.
+---
+
+## 🧠 Usage Example
+
+### Creating an Agent
 
 ```rust
 use aagt_core::prelude::*;
-use aagt_core::pipeline::{Pipeline, Context};
-use aagt_core::notifications::TelegramStep;
-use aagt_core::store::FileStoreConfig;
+use aagt_providers::openai::OpenAI;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Setup lightweight memory (JSONL file)
-    let memory = FileStore::new(FileStoreConfig::new("data/memory.jsonl")).await?;
-
-    // 2. Build the Agent
-    let provider = Gemini::from_env()?;
+    let provider = OpenAI::from_env()?;
+    
     let agent = Agent::builder(provider)
-        .model("gemini-2.0-flash")
-        .memory(memory)
+        .model("gpt-4o")
+        .preamble("You are a specialized crypto trading assistant.")
         .build()?;
 
-    // 3. Define the Strategy Pipeline
-    let pipeline = Pipeline::new("Daily Analysis")
-        .add_step(FetchMarketData)      // Custom Step
-        .add_step(AgentAnalyzeStep)     // Agent Step
-        .add_step(TelegramStep::new(
-            "YOUR_BOT_TOKEN",
-            "YOUR_CHAT_ID", 
-            "Analysis: {outcome}"
-        ));
-
-    // 4. Run it!
-    pipeline.run("Analyze BTC").await?;
-    
+    let response = agent.prompt("Analyze the current trend of SOL").await?;
+    println!("{}", response);
     Ok(())
 }
 ```
 
----
+### Risk Configuration
 
-## Project Structure
-
-- **`aagt-core`**: The brain. Traits, Pipelines, Memory, and basic Tools.
-- **`aagt-providers`**: LLM integrations (Gemini, OpenAI, DeepSeek, etc.).
-- **`aagt-macros`**: Proc-macros for simplifying Tool creation.
-
----
-
-## Philosophy
-
-We believe AI trading should be **democratized**. 
-Most frameworks assume you have unlimited budgets for GPUs and SaaS subscriptions. AAGT assumes you might be a student or independent researcher running on a tight budget, but who still demands **professional-grade reliability**.
+```rust
+let config = RiskConfig {
+    max_single_trade_usd: 1000.0,
+    max_daily_volume_usd: 5000.0,
+    stop_loss_percent: 5.0,
+    ..Default::default()
+};
+let risk_manager = RiskManager::with_config(config, store);
+```
 
 ---
 
----
+## ⚠️ Disclaimer
 
-## Contributing
-
-We welcome contributions! Please check out [ARCHITECTURE.md](./ARCHITECTURE.md) to understand the system design before submitting PRs.
-
-## License
-
-MIT
+This software is for educational and research purposes. Cryptocurrency trading involves significant risk. The authors are not responsible for financial losses. Always test strategies in simulation mode first.

@@ -1,24 +1,27 @@
 //! Agent system - the core AI agent abstraction
 
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing::{info, instrument};
 
 use crate::error::{Error, Result};
-use crate::message::Message;
+use crate::message::{Content, Message, Role};
 use crate::provider::Provider;
 use crate::streaming::StreamingResponse;
 use crate::tool::{Tool, ToolSet};
 
-/// Configuration for an agent
+/// Configuration for an Agent
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    /// System prompt / preamble
-    pub system_prompt: Option<String>,
-    /// Model name to use
+    /// Name of the agent (for logging/identity)
+    pub name: String,
+    /// Model to use (provider specific string)
     pub model: String,
+    /// System prompt / Preamble
+    pub preamble: String,
     /// Temperature for generation
     pub temperature: Option<f64>,
-    /// Maximum tokens to generate
+    /// Max tokens to generate
     pub max_tokens: Option<u64>,
     /// Additional provider-specific parameters
     pub extra_params: Option<serde_json::Value>,
@@ -27,23 +30,39 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            system_prompt: None,
+            name: "agent".to_string(),
             model: "gpt-4o".to_string(),
-            temperature: None,
+            preamble: "You are a helpful AI assistant.".to_string(),
+            temperature: Some(0.7),
             max_tokens: Some(4096),
             extra_params: None,
         }
     }
 }
 
-/// The main Agent struct - combines a provider with tools and configuration
+/// Events emitted by the Agent during execution
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum AgentEvent {
+    /// Agent started thinking (prompt received)
+    Thinking { prompt: String },
+    /// Agent decided to use a tool
+    ToolCall { tool: String, input: String },
+    /// Tool execution finished
+    ToolResult { tool: String, output: String },
+    /// Agent generated a final response
+    Response { content: String },
+    /// Error occurred
+    Error { message: String },
+}
+
+/// The main Agent struct
 pub struct Agent<P: Provider> {
-    /// The LLM provider
     provider: Arc<P>,
-    /// Tools available to this agent
     tools: ToolSet,
-    /// Agent configuration
     config: AgentConfig,
+    /// Event bus for observability
+    events: broadcast::Sender<AgentEvent>,
 }
 
 impl<P: Provider> Agent<P> {
@@ -52,25 +71,50 @@ impl<P: Provider> Agent<P> {
         AgentBuilder::new(provider)
     }
 
+    /// Subscribe to agent events
+    pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
+        self.events.subscribe()
+    }
+
+    /// Helper to emit events safely
+    fn emit(&self, event: AgentEvent) {
+        let _ = self.events.send(event);
+    }
+
     /// Send a prompt and get a response (non-streaming)
     #[instrument(skip(self, prompt), fields(model = %self.config.model))]
     pub async fn prompt(&self, prompt: impl Into<String>) -> Result<String> {
         let prompt_str = prompt.into();
-        info!(prompt_len = prompt_str.len(), "Agent received prompt");
+        self.emit(AgentEvent::Thinking { prompt: prompt_str.clone() });
         
-        let messages = vec![Message::user(prompt_str)];
+        let messages = vec![
+            Message::user(prompt_str)
+        ];
+        
         self.chat(messages).await
     }
 
     /// Send messages and get a response (non-streaming)
     #[instrument(skip(self, messages), fields(model = %self.config.model, message_count = messages.len()))]
     pub async fn chat(&self, messages: Vec<Message>) -> Result<String> {
+        if let Some(last) = messages.last() {
+             // Only emit thinking if not already emitted by prompt()
+             if last.role == Role::User {
+                // We blindly emit thinking here for chat calls too
+                self.emit(AgentEvent::Thinking { prompt: last.content.as_text() });
+             }
+        }
+
         info!("Agent starting chat completion");
-        
+
         let stream = self.stream_chat(messages).await?;
-        let response = stream.collect_text().await?;
         
-        info!(response_len = response.len(), "Agent completed chat");
+        // Collect stream response
+        // Note: collecting text consumes the stream.
+        // Ideally we would want to emit tokens as they come, but for now we emit full response at end.
+        let response = stream.collect_text().await?;
+
+        self.emit(AgentEvent::Response { content: response.clone() });
         Ok(response)
     }
 
@@ -85,7 +129,7 @@ impl<P: Provider> Agent<P> {
         self.provider
             .stream_completion(
                 &self.config.model,
-                self.config.system_prompt.as_deref(),
+                Some(&self.config.preamble), // Use preamble as system prompt
                 messages,
                 self.tools.definitions().await,
                 self.config.temperature,
@@ -98,12 +142,20 @@ impl<P: Provider> Agent<P> {
     /// Call a tool by name
     #[instrument(skip(self, arguments), fields(tool_name = %name))]
     pub async fn call_tool(&self, name: &str, arguments: &str) -> Result<String> {
-        info!(args_len = arguments.len(), "Calling tool");
+        self.emit(AgentEvent::ToolCall { tool: name.to_string(), input: arguments.to_string() });
+
+        let result = self.tools.call(name, arguments).await;
         
-        let result = self.tools.call(name, arguments).await?;
-        
-        info!(result_len = result.len(), "Tool execution completed");
-        Ok(result)
+        match result {
+            Ok(ref output) => {
+                self.emit(AgentEvent::ToolResult { tool: name.to_string(), output: output.clone() });
+                Ok(output.clone())
+            },
+            Err(ref e) => {
+                self.emit(AgentEvent::Error { message: e.to_string() });
+                Err(Error::tool_execution(name.to_string(), e.to_string()))
+            }
+        }
     }
 
     /// Check if agent has a tool
@@ -152,7 +204,7 @@ impl<P: Provider> AgentBuilder<P> {
 
     /// Set the system prompt
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.config.system_prompt = Some(prompt.into());
+        self.config.preamble = prompt.into();
         self
     }
 
@@ -206,10 +258,13 @@ impl<P: Provider> AgentBuilder<P> {
             return Err(Error::agent_config("model name cannot be empty"));
         }
 
+        let (tx, _) = broadcast::channel(100);
+
         Ok(Agent {
             provider: Arc::new(self.provider),
             tools: self.tools,
             config: self.config,
+            events: tx,
         })
     }
 }
@@ -222,7 +277,6 @@ mod tests {
     fn test_agent_config_default() {
         let config = AgentConfig::default();
         assert_eq!(config.model, "gpt-4o");
-        assert!(config.system_prompt.is_none());
         assert_eq!(config.max_tokens, Some(4096));
     }
 }

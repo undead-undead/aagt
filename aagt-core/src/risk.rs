@@ -10,8 +10,12 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use chrono::{DateTime, Utc};
+use futures::FutureExt;
 
 use crate::error::{Error, Result};
+
+mod circuit_breaker;
+pub use circuit_breaker::DeadManSwitch;
 
 /// Persistence trait for risk state
 #[async_trait::async_trait]
@@ -41,7 +45,10 @@ impl RiskStateStore for FileRiskStore {
         if content.trim().is_empty() {
             return Ok(HashMap::new());
         }
-        serde_json::from_str(&content).map_err(|e| Error::Internal(format!("Failed to parse risk state: {}", e)))
+        
+        serde_json::from_str(&content).map_err(|e| {
+            Error::Internal(format!("CORRUPTION: Risk state file at {:?} is malformed. Delete it to reset or fix JSON: {}", self.path, e))
+        })
     }
 
     async fn save(&self, states: &HashMap<String, UserState>) -> Result<()> {
@@ -195,49 +202,23 @@ struct RiskActor {
     state: HashMap<String, UserState>,
     store: Arc<dyn RiskStateStore>,
     receiver: mpsc::Receiver<RiskCommand>,
+    last_load_time: Option<DateTime<Utc>>,
 }
 
 impl RiskActor {
-    async fn run(mut self) {
-        // Initial load (best effort, ideally called explicitly for strict mode)
-        if let Err(e) = self.handle_load().await {
-            tracing::warn!("Failed to auto-load risk state on startup: {}", e);
-        } else {
-            tracing::info!("Risk state auto-loaded successfully. User count: {}", self.state.len());
-        }
-        
-        while let Some(msg) = self.receiver.recv().await {
-             match msg {
-                 RiskCommand::CheckAndReserve { context, checks, reply } => {
-                     let res = self.handle_check_and_reserve(context, &checks);
-                     let _ = reply.send(res);
-                 }
-                 RiskCommand::Commit { user_id, amount_usd, reply } => {
-                     let res = self.handle_commit(user_id, amount_usd).await;
-                     let _ = reply.send(res);
-                 }
-                 RiskCommand::Rollback { user_id, amount_usd } => {
-                     self.handle_rollback(user_id, amount_usd);
-                 }
-                 RiskCommand::GetRemaining { user_id, reply } => {
-                     let val = self.handle_get_remaining(user_id);
-                     let _ = reply.send(val);
-                 }
-                 RiskCommand::LoadState { reply } => {
-                     let res = self.handle_load().await;
-                     let _ = reply.send(res);
-                 }
-             }
-        }
-    }
 
     async fn handle_load(&mut self) -> Result<()> {
         let loaded = self.store.load().await?;
         self.state = loaded;
+        self.last_load_time = Some(Utc::now());
         Ok(())
     }
 
-    fn handle_check_and_reserve(&mut self, context: TradeContext, checks: &[Arc<dyn RiskCheck>]) -> Result<()> {
+    async fn handle_check_and_reserve(&mut self, context: TradeContext, checks: &[Arc<dyn RiskCheck>]) -> Result<()> {
+         // 0. Multi-process reload check (Simple version: always reload or check timestamp)
+         // For now, let's just reload to be 100% safe in multi-process scenarios
+         let _ = self.handle_load().await;
+
          // 1. Stateless Checks
         if context.amount_usd > self.config.max_single_trade_usd {
             return Err(Error::RiskLimitExceeded {
@@ -351,8 +332,60 @@ impl RiskManager {
             state: HashMap::new(),
             store,
             receiver: rx,
+            last_load_time: None,
         };
-        tokio::spawn(actor.run());
+        tokio::spawn(async move {
+            let mut actor = actor;
+            loop {
+                let rx = &mut actor.receiver;
+                // If the receiver is closed, the manager is dropped, so we should exit
+                if rx.is_closed() {
+                    break;
+                }
+
+                tracing::info!("RiskActor starting/restarting");
+                let res = std::panic::AssertUnwindSafe(async {
+                    // We need to re-create the actor if we want to reset some state, 
+                    // but here we just want to keep the loop running and handle messages.
+                    // The state is already in the `actor` struct.
+                    
+                    // Actually, if it panics, we might want to reload state from disk
+                    // but we have to be careful about pending volume.
+                    // For now, just keep the task alive.
+                    while let Some(msg) = actor.receiver.recv().await {
+                         match msg {
+                             RiskCommand::CheckAndReserve { context, checks, reply } => {
+                                 let res = actor.handle_check_and_reserve(context, &checks).await;
+                                 let _ = reply.send(res);
+                             }
+                             RiskCommand::Commit { user_id, amount_usd, reply } => {
+                                 let res = actor.handle_commit(user_id, amount_usd).await;
+                                 let _ = reply.send(res);
+                             }
+                             RiskCommand::Rollback { user_id, amount_usd } => {
+                                 actor.handle_rollback(user_id, amount_usd);
+                             }
+                             RiskCommand::GetRemaining { user_id, reply } => {
+                                 let val = actor.handle_get_remaining(user_id);
+                                 let _ = reply.send(val);
+                             }
+                             RiskCommand::LoadState { reply } => {
+                                 let res = actor.handle_load().await;
+                                 let _ = reply.send(res);
+                             }
+                         }
+                    }
+                }).catch_unwind().await;
+
+                if let Err(_) = res {
+                    tracing::error!("RiskActor PANICKED. Restarting in 1s...");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                } else {
+                    // Normal exit (sender dropped)
+                    break;
+                }
+            }
+        });
 
         Self {
             sender: tx,

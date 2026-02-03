@@ -253,17 +253,18 @@ where
         input_json: String,
     }
 
-    let buffer = String::new();
+    let sse_buffer = crate::utils::SseBuffer::new();
+    let string_buffer = String::new();
     let current_tool: Option<ToolState> = None;
 
     futures::stream::unfold(
-        (stream, buffer, current_tool),
-        move |(mut stream, mut buffer, mut current_tool)| async move {
+        (stream, sse_buffer, string_buffer, current_tool),
+        move |(mut stream, mut bytes_buffer, mut text_buffer, mut current_tool)| async move {
             loop {
                 // Try to extract complete SSE message
-                if let Some(pos) = buffer.find("\n\n") {
-                    let line = buffer[..pos].to_string();
-                    buffer = buffer[pos + 2..].to_string();
+                if let Some(pos) = text_buffer.find("\n\n") {
+                    let line = text_buffer[..pos].to_string();
+                    text_buffer = text_buffer[pos + 2..].to_string();
 
                     // Parse event
                     if let Some(data) = line.strip_prefix("data: ") {
@@ -288,7 +289,7 @@ where
                                                 if !text.is_empty() {
                                                     return Some((
                                                         Ok(StreamingChoice::Message(text)),
-                                                        (stream, buffer, current_tool),
+                                                        (stream, bytes_buffer, text_buffer, current_tool),
                                                     ));
                                                 }
                                             }
@@ -310,14 +311,14 @@ where
                                                     name: tool.name,
                                                     arguments: args,
                                                 }),
-                                                (stream, buffer, None),
+                                                (stream, bytes_buffer, text_buffer, None),
                                             ));
                                         }
                                     }
                                     "message_stop" => {
                                         return Some((
                                             Ok(StreamingChoice::Done),
-                                            (stream, buffer, current_tool),
+                                            (stream, bytes_buffer, text_buffer, current_tool),
                                         ));
                                     }
                                     _ => {}
@@ -334,12 +335,14 @@ where
                 // Need more data
                 match stream.next().await {
                     Some(Ok(bytes)) => {
-                        match String::from_utf8(bytes.to_vec()) {
-                            Ok(s) => buffer.push_str(&s),
+                        match bytes_buffer.push_and_get_text(&bytes) {
+                            Ok(new_text) => {
+                                text_buffer.push_str(&new_text);
+                            }
                             Err(e) => {
                                 return Some((
-                                    Err(Error::StreamInterrupted(e.to_string())),
-                                    (stream, buffer, current_tool),
+                                    Err(e),
+                                    (stream, bytes_buffer, text_buffer, current_tool),
                                 ));
                             }
                         }
@@ -347,7 +350,7 @@ where
                     Some(Err(e)) => {
                         return Some((
                             Err(Error::Http(e)),
-                            (stream, buffer, current_tool),
+                            (stream, bytes_buffer, text_buffer, current_tool),
                         ));
                     }
                     None => return None,

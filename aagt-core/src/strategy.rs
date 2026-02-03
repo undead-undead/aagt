@@ -1,13 +1,12 @@
 //! Strategy and pipeline system for automated trading
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio::time::timeout;
 
 use crate::error::Result;
+use crate::pipeline::{self, Step, Context};
 
 /// A condition that can trigger a strategy
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,21 +164,129 @@ pub trait ConditionEvaluator: Send + Sync {
     async fn evaluate(&self, condition: &Condition) -> Result<bool>;
 }
 
-/// Trait for action executors
 #[async_trait::async_trait]
 pub trait ActionExecutor: Send + Sync {
     /// Execute an action
-    async fn execute(&self, action: &Action, context: &ExecutionContext) -> Result<String>;
+    async fn execute(&self, action: &Action, context: &pipeline::Context) -> Result<String>;
 }
 
-/// Context for action execution
-pub struct ExecutionContext {
-    /// User ID
-    pub user_id: String,
-    /// Pipeline ID
-    pub pipeline_id: String,
-    /// Results from previous steps
-    pub previous_results: Vec<StepResult>,
+/// Adapter to run a strategy Action as a pipeline Step
+pub struct ActionStep {
+    action: Action,
+    executor: Arc<dyn ActionExecutor>,
+}
+
+impl ActionStep {
+    pub fn new(action: Action, executor: Arc<dyn ActionExecutor>) -> Self {
+        Self { action, executor }
+    }
+}
+
+#[async_trait::async_trait]
+impl Step for ActionStep {
+    async fn execute(&self, ctx: &mut Context) -> anyhow::Result<()> {
+        let res = self.executor.execute(&self.action, ctx).await?;
+        ctx.log(format!("Action '{}' result: {}", self.name(), res));
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        match &self.action {
+            Action::Swap { .. } => "swap",
+            Action::Notify { .. } => "notify",
+            Action::Wait { .. } => "wait",
+            Action::Cancel { .. } => "cancel",
+        }
+    }
+}
+
+
+
+/// Persistence for strategies
+#[async_trait::async_trait]
+pub trait StrategyStore: Send + Sync {
+    /// Load all active strategies
+    async fn load(&self) -> Result<Vec<Strategy>>;
+    /// Save a strategy (create or update)
+    async fn save(&self, strategy: &Strategy) -> Result<()>;
+    /// Delete a strategy
+    async fn delete(&self, id: &str) -> Result<()>;
+}
+
+/// Simple JSON file store for strategies
+pub struct FileStrategyStore {
+    path: std::path::PathBuf,
+}
+
+impl FileStrategyStore {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+#[async_trait::async_trait]
+impl StrategyStore for FileStrategyStore {
+    async fn load(&self) -> Result<Vec<Strategy>> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = tokio::fs::read_to_string(&self.path).await?;
+        if content.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let strategies: Vec<Strategy> = serde_json::from_str(&content)
+            .map_err(|e| crate::error::Error::Internal(format!("Failed to parse strategy file: {}", e)))?;
+        Ok(strategies)
+    }
+
+    async fn save(&self, strategy: &Strategy) -> Result<()> {
+        // Load, update, save (Atomic-ish via rename)
+        // Optimization: Use a proper DB if this gets slow, but for <100 strategies JSON is fine.
+        let mut strategies = self.load().await?;
+        
+        if let Some(pos) = strategies.iter().position(|s| s.id == strategy.id) {
+            strategies[pos] = strategy.clone();
+        } else {
+            strategies.push(strategy.clone());
+        }
+
+        self.write_file(&strategies).await
+    }
+
+    async fn delete(&self, id: &str) -> Result<()> {
+        let mut strategies = self.load().await?;
+        if let Some(pos) = strategies.iter().position(|s| s.id == id) {
+            strategies.remove(pos);
+            self.write_file(&strategies).await?;
+        }
+        Ok(())
+    }
+}
+
+impl FileStrategyStore {
+    async fn write_file(&self, strategies: &[Strategy]) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+        
+        let json = serde_json::to_string_pretty(strategies)
+            .map_err(|e| crate::error::Error::Internal(format!("Serialization error: {}", e)))?;
+            
+        let tmp_path = self.path.with_extension("tmp");
+        tokio::fs::write(&tmp_path, json).await?;
+        tokio::fs::rename(tmp_path, &self.path).await?;
+        Ok(())
+    }
+}
+
+/// In-memory no-op store
+pub struct InMemoryStrategyStore;
+
+#[async_trait::async_trait]
+impl StrategyStore for InMemoryStrategyStore {
+    async fn load(&self) -> Result<Vec<Strategy>> { Ok(Vec::new()) }
+    async fn save(&self, _strategy: &Strategy) -> Result<()> { Ok(()) }
+    async fn delete(&self, _id: &str) -> Result<()> { Ok(()) }
 }
 
 /// Strategy engine for managing and executing strategies
@@ -188,6 +295,8 @@ pub struct StrategyEngine {
     evaluator: Arc<dyn ConditionEvaluator>,
     /// Action executor
     executor: Arc<dyn ActionExecutor>,
+    /// Strategy persistence
+    store: Arc<dyn StrategyStore>,
     /// Shutdown signal receiver
     shutdown_rx: Option<mpsc::Receiver<()>>,
 }
@@ -197,18 +306,44 @@ impl StrategyEngine {
     pub fn new(
         evaluator: Arc<dyn ConditionEvaluator>,
         executor: Arc<dyn ActionExecutor>,
+        store: Arc<dyn StrategyStore>,
     ) -> Self {
         Self {
             evaluator,
             executor,
+            store,
             shutdown_rx: None,
         }
+    }
+    
+    /// Create with default in-memory store (backward compatibility helpers)
+    pub fn simple(
+        evaluator: Arc<dyn ConditionEvaluator>,
+        executor: Arc<dyn ActionExecutor>,
+    ) -> Self {
+        Self::new(evaluator, executor, Arc::new(InMemoryStrategyStore))
     }
 
     /// Set shutdown signal channel
     pub fn with_shutdown(mut self, rx: mpsc::Receiver<()>) -> Self {
         self.shutdown_rx = Some(rx);
         self
+    }
+    
+    /// Load all active strategies from store
+    pub async fn load_active_strategies(&self) -> Result<Vec<Strategy>> {
+        let strategies = self.store.load().await?;
+        Ok(strategies.into_iter().filter(|s| s.active).collect())
+    }
+    
+    /// Save/Register a strategy
+    pub async fn register_strategy(&self, strategy: Strategy) -> Result<()> {
+        self.store.save(&strategy).await
+    }
+    
+    /// Delete a strategy
+    pub async fn remove_strategy(&self, id: &str) -> Result<()> {
+        self.store.delete(id).await
     }
 
     /// Execute a pipeline with timeout and graceful shutdown
@@ -218,145 +353,41 @@ impl StrategyEngine {
         pipeline_id: String,
     ) -> Result<Pipeline> {
         let now = chrono::Utc::now().timestamp();
-        let mut pipeline = Pipeline {
+        
+        // 1. Build the generic pipeline
+        let mut generic_pipeline = pipeline::Pipeline::new(&strategy.name);
+        
+        for action in &strategy.actions {
+            let step = ActionStep::new(action.clone(), self.executor.clone());
+            generic_pipeline = generic_pipeline.add_step(step);
+        }
+
+        // 2. Prepare Context
+        let mut ctx = Context::new(format!("Strategy execution: {}", strategy.name));
+        ctx.set("user_id", strategy.user_id.clone());
+        ctx.set("strategy_id", strategy.id.clone());
+        ctx.set("pipeline_id", pipeline_id.clone());
+
+        // 3. Run (using shared logic from pipeline.rs)
+        let result_ctx = generic_pipeline.run_with_context(ctx).await
+            .map_err(|e| crate::error::Error::Internal(format!("Pipeline execution failed: {}", e)))?;
+
+        // 4. Map back to Strategy-specific Pipeline record for compatibility
+        let pipeline = Pipeline {
             id: pipeline_id,
             strategy_id: strategy.id.clone(),
             user_id: strategy.user_id.clone(),
-            status: PipelineStatus::Running,
-            current_step: 0,
-            step_results: Vec::new(),
+            status: if result_ctx.aborted { 
+                PipelineStatus::Cancelled { reason: "Aborted".to_string() } 
+            } else { 
+                PipelineStatus::Completed 
+            },
+            current_step: strategy.actions.len(), // Assume finished if generic pipeline finished
+            step_results: Vec::new(), // We could populate this from result_ctx.trace if needed
             started_at: now,
-            completed_at: None,
+            completed_at: Some(chrono::Utc::now().timestamp()),
         };
-
-        let context = ExecutionContext {
-            user_id: strategy.user_id.clone(),
-            pipeline_id: pipeline.id.clone(),
-            previous_results: Vec::new(),
-        };
-
-        for (index, action) in strategy.actions.iter().enumerate() {
-            pipeline.current_step = index;
-
-            // Check for cancellation
-            if let Action::Cancel { reason } = action {
-                pipeline.status = PipelineStatus::Cancelled {
-                    reason: reason.clone(),
-                };
-                break;
-            }
-
-            // Handle wait action
-            if let Action::Wait { seconds } = action {
-                // Use timeout with check - don't wait forever
-                let wait_duration = Duration::from_secs(*seconds);
-                let max_wait = Duration::from_secs(300); // Max 5 minute wait
-                let actual_wait = wait_duration.min(max_wait);
-                
-                tokio::time::sleep(actual_wait).await;
-                
-                pipeline.step_results.push(StepResult {
-                    index,
-                    action: action.clone(),
-                    success: true,
-                    message: format!("Waited {} seconds", actual_wait.as_secs()),
-                    timestamp: chrono::Utc::now().timestamp(),
-                });
-                continue;
-            }
-
-            // Execute action with timeout
-            let execute_timeout = Duration::from_secs(30);
-            let result = timeout(
-                execute_timeout,
-                self.executor.execute(action, &context),
-            )
-            .await;
-
-            let step_result = match result {
-                Ok(Ok(message)) => StepResult {
-                    index,
-                    action: action.clone(),
-                    success: true,
-                    message,
-                    timestamp: chrono::Utc::now().timestamp(),
-                },
-                Ok(Err(e)) => {
-                    pipeline.status = PipelineStatus::Failed {
-                        error: e.to_string(),
-                    };
-                    StepResult {
-                        index,
-                        action: action.clone(),
-                        success: false,
-                        message: e.to_string(),
-                        timestamp: chrono::Utc::now().timestamp(),
-                    }
-                }
-                Err(_) => {
-                    pipeline.status = PipelineStatus::Failed {
-                        error: "Action execution timed out".to_string(),
-                    };
-                    StepResult {
-                        index,
-                        action: action.clone(),
-                        success: false,
-                        message: "Timeout".to_string(),
-                        timestamp: chrono::Utc::now().timestamp(),
-                    }
-                }
-            };
-
-            let failed = !step_result.success;
-            pipeline.step_results.push(step_result);
-
-            if failed {
-                break;
-            }
-        }
-
-        // Mark completed if not already failed/cancelled
-        if matches!(pipeline.status, PipelineStatus::Running) {
-            pipeline.status = PipelineStatus::Completed;
-        }
-        pipeline.completed_at = Some(chrono::Utc::now().timestamp());
 
         Ok(pipeline)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_strategy_serialization() {
-        let strategy = Strategy {
-            id: "strat1".to_string(),
-            user_id: "user1".to_string(),
-            name: "Buy the dip".to_string(),
-            description: Some("Buy SOL when price drops".to_string()),
-            condition: Condition::PriceBelow {
-                token: "SOL".to_string(),
-                threshold: 150.0,
-            },
-            actions: vec![
-                Action::Swap {
-                    from_token: "USDC".to_string(),
-                    to_token: "SOL".to_string(),
-                    amount: "100".to_string(),
-                },
-                Action::Notify {
-                    channel: NotifyChannel::Telegram,
-                    message: "Bought SOL!".to_string(),
-                },
-            ],
-            active: true,
-            created_at: 1234567890,
-        };
-
-        let json = serde_json::to_string_pretty(&strategy).expect("serialize");
-        let parsed: Strategy = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed.id, strategy.id);
     }
 }

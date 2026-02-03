@@ -1,0 +1,70 @@
+    Checking aagt-core v0.1.2 (/home/biubiuboy/aagt/aagt-core)
+error[E0433]: failed to resolve: use of undeclared type `Content`
+  --> aagt-core/src/agent.rs:93:26
+   |
+93 |                 content: Content::Text(prompt_str),
+   |                          ^^^^^^^ use of undeclared type `Content`
+   |
+help: consider importing this enum through its public re-export
+   |
+ 3 + use crate::prelude::Content;
+   |
+
+error[E0277]: the trait bound `Message: Default` is not satisfied
+   --> aagt-core/src/agent.rs:94:19
+    |
+ 94 |                 ..Default::default()
+    |                   ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `Default` is not implemented for `Message`
+   --> aagt-core/src/message.rs:123:1
+    |
+123 | pub struct Message {
+    | ^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> aagt-core/src/agent.rs:108:58
+    |
+108 |                 self.emit(AgentEvent::Thinking { prompt: last.content.clone() });
+    |                                                          ^^^^^^^^^^^^^^^^^^^^ expected `String`, found `Content`
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+   --> aagt-core/src/agent.rs:160:21
+    |
+160 |                 Err(Error::tool_execution(e.to_string()))
+    |                     ^^^^^^^^^^^^^^^^^^^^^--------------- argument #2 is missing
+    |
+note: associated function defined here
+   --> aagt-core/src/error.rs:164:12
+    |
+164 |     pub fn tool_execution(tool_name: impl Into<String>, message: impl Into<String>) -> Self {
+    |            ^^^^^^^^^^^^^^                               --------------------------
+help: provide the argument
+    |
+160 |                 Err(Error::tool_execution(e.to_string(), /* message */))
+    |                                                        +++++++++++++++
+
+warning: unused variable: `user_id`
+   --> aagt-core/src/memory.rs:251:24
+    |
+251 |     fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
+    |                        ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_user_id`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `agent_id`
+   --> aagt-core/src/memory.rs:251:39
+    |
+251 |     fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
+    |                                       ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_agent_id`
+
+warning: unused variable: `limit`
+   --> aagt-core/src/memory.rs:251:63
+    |
+251 |     fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
+    |                                                               ^^^^^ help: if this is intentional, prefix it with an underscore: `_limit`
+
+Some errors have detailed explanations: E0061, E0277, E0308, E0433.
+For more information about an error, try `rustc --explain E0061`.
+warning: `aagt-core` (lib) generated 3 warnings
+error: could not compile `aagt-core` (lib) due to 4 previous errors; 3 warnings emitted

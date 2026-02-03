@@ -23,6 +23,8 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncWriteExt, AsyncBufReadExt, AsyncSeekExt, SeekFrom, AsyncReadExt};
 use tokio::sync::{RwLock, mpsc, oneshot};
 use rayon::prelude::*;
+use std::os::unix::fs::FileExt;
+use futures::FutureExt;
 
 /// Configuration for FileStore
 #[derive(Debug, Clone)]
@@ -63,23 +65,6 @@ struct FileStoreActor {
 }
 
 impl FileStoreActor {
-    async fn run(mut self) {
-        while let Some(msg) = self.receiver.recv().await {
-            match msg {
-                StoreMessage::Append { line, reply } => {
-                    let res = self.handle_append(line).await;
-                    let _ = reply.send(res);
-                }
-                StoreMessage::Compact { indices, reply } => {
-                    let res = self.handle_compact(indices).await;
-                    let _ = reply.send(res);
-                }
-                StoreMessage::SaveSnapshot { indices } => {
-                    let _ = self.handle_save_snapshot(indices).await;
-                }
-            }
-        }
-    }
 
     async fn handle_append(&self, line: String) -> Result<(u64, u64)> {
         // atomic append relying on OS file locks or just exclusive actor access 
@@ -163,6 +148,8 @@ pub struct FileStore {
     embedder: Option<Arc<dyn Embeddings>>,
     /// Channel to Actor
     sender: mpsc::Sender<StoreMessage>,
+    /// Persistent read handle for efficient random access
+    reader: Arc<std::fs::File>,
 }
 
 /// In-memory index entry - optimized for RAM
@@ -202,24 +189,66 @@ impl FileStore {
     pub async fn new(config: FileStoreConfig) -> Result<Self> {
         let indices = Arc::new(RwLock::new(Vec::new()));
         
-        // Ensure directory exists
-        if let Some(parent) = config.path.parent() {
-            fs::create_dir_all(parent).await.ok();
+        // Initialize reader (create file if not exists)
+        if !config.path.exists() {
+            if let Some(parent) = config.path.parent() {
+                fs::create_dir_all(parent).await.ok();
+            }
+            fs::File::create(&config.path).await.ok();
         }
 
-        // Spawn Actor
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&config.path)
+            .map_err(|e| Error::MemoryStorage(format!("Failed to open read handle at {:?}: {}", config.path, e)))?;
+
+        // Spawn Actor for writes
         let (tx, rx) = mpsc::channel(100);
         let actor = FileStoreActor {
             path: config.path.clone(),
             receiver: rx,
         };
-        tokio::spawn(actor.run());
+        tokio::spawn(async move {
+            let mut actor = actor;
+            loop {
+                if actor.receiver.is_closed() {
+                    break;
+                }
+
+                tracing::info!("FileStoreActor starting/restarting");
+                let res = std::panic::AssertUnwindSafe(async {
+                    while let Some(msg) = actor.receiver.recv().await {
+                        match msg {
+                            StoreMessage::Append { line, reply } => {
+                                let res = actor.handle_append(line).await;
+                                let _ = reply.send(res);
+                            }
+                            StoreMessage::Compact { indices, reply } => {
+                                let res = actor.handle_compact(indices).await;
+                                let _ = reply.send(res);
+                            }
+                            StoreMessage::SaveSnapshot { indices } => {
+                                let _ = actor.handle_save_snapshot(indices).await;
+                            }
+                        }
+                    }
+                }).catch_unwind().await;
+
+                if let Err(_) = res {
+                    tracing::error!("FileStoreActor PANICKED. Restarting in 1s...");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                } else {
+                    break;
+                }
+            }
+        });
 
         let store = Self { 
             config, 
             indices,
             embedder: None,
             sender: tx,
+            reader: Arc::new(reader),
         };
         
         store.load().await?;
@@ -333,15 +362,16 @@ impl FileStore {
 
     /// Read a specific document content from disk
     async fn read_content(&self, offset: u64, length: u64) -> Result<StoredDocument> {
-        // Reading is safe concurrently with Appending (on Linux/Unix)
-        // We open a new handle for this read.
-        let mut file = fs::File::open(&self.config.path).await?;
-        file.seek(SeekFrom::Start(offset)).await?;
-        
-        let mut buffer = vec![0u8; length as usize];
-        file.read_exact(&mut buffer).await?;
-        
-        let s = String::from_utf8(buffer)
+        // Use pread (read_at) to avoid seeking and syscall overhead of repeated open()
+        let reader = self.reader.clone();
+        let bytes = tokio::task::spawn_blocking(move || {
+            let mut buffer = vec![0u8; length as usize];
+            reader.read_exact_at(&mut buffer, offset)
+                .map_err(|e| Error::MemoryStorage(format!("IO error: {}", e)))?;
+            Ok::<Vec<u8>, Error>(buffer)
+        }).await.map_err(|e| Error::Internal(format!("Join error: {}", e)))??;
+
+        let s = String::from_utf8(bytes)
             .map_err(|e| Error::MemoryStorage(format!("UTF8 error: {}", e)))?;
             
         serde_json::from_str(&s)
@@ -446,9 +476,42 @@ impl FileStore {
                 });
             }
         }
-        // Reverse to have newest first if that's expected by caller, or keep chronological.
-        // Usually tail implies [..., newest].
         results
+    }
+    
+    /// Trigger manual compaction to reclaim disk space
+    pub async fn compact(&self) -> Result<()> {
+        let indices_to_keep = self.indices.read().await.clone();
+        
+        let (tx, rx) = oneshot::channel();
+        self.sender.send(StoreMessage::Compact { indices: indices_to_keep, reply: tx }).await
+            .map_err(|_| Error::Internal("FileStore actor closed".to_string()))?;
+            
+        let new_offsets = rx.await
+            .map_err(|_| Error::Internal("FileStore reply dropped".to_string()))??;
+
+        // Update offsets in memory
+        let mut indices_mut = self.indices.write().await;
+        for (i, offset) in new_offsets.into_iter().enumerate() {
+            if i < indices_mut.len() {
+                 indices_mut[i].offset = offset;
+            }
+        }
+        
+        // Save Snapshot
+        self.queue_snapshot(&indices_mut).await;
+        Ok(())
+    }
+
+    /// Automatically trigger compaction if the number of documents exceeds a threshold
+    /// or if the ratio of deleted documents is high (not fully implemented due to soft-delete nature)
+    pub async fn auto_compact(&self, threshold: usize) -> Result<()> {
+        let len = self.indices.read().await.len();
+        if len > threshold {
+            tracing::info!("Auto-compacting FileStore ({} > {})", len, threshold);
+            self.compact().await?;
+        }
+        Ok(())
     }
 }
 
@@ -549,38 +612,16 @@ impl VectorStore for FileStore {
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        // 1. Remove from index
-        let mut indices_to_keep = Vec::new();
-        {
-            let mut indices = self.indices.write().await;
-            if let Some(pos) = indices.iter().position(|idx| idx.id == id) {
-                indices.remove(pos);
-                indices_to_keep = indices.clone();
-            } else {
-                return Ok(());
-            }
+        // 1. Remove from index (Soft Delete)
+        // We only update in-memory state and snapshot. Full compaction is deferred.
+        let mut indices = self.indices.write().await;
+        if let Some(pos) = indices.iter().position(|idx| idx.id == id) {
+            indices.remove(pos);
+            // 2. Save Snapshot to reflect deletion
+            self.queue_snapshot(&indices).await;
+            Ok(())
+        } else {
+            Ok(())
         }
-
-        // 2. Send Compact Request to Actor
-        let (tx, rx) = oneshot::channel();
-        self.sender.send(StoreMessage::Compact { indices: indices_to_keep, reply: tx }).await
-            .map_err(|_| Error::Internal("FileStore actor closed".to_string()))?;
-            
-        let new_offsets = rx.await
-            .map_err(|_| Error::Internal("FileStore reply dropped".to_string()))??;
-
-        // 3. Update offsets in memory
-        {
-            let mut indices_mut = self.indices.write().await;
-            for (i, offset) in new_offsets.into_iter().enumerate() {
-                if i < indices_mut.len() {
-                     indices_mut[i].offset = offset;
-                }
-            }
-            // Save Snapshot
-            self.queue_snapshot(&indices_mut).await;
-        }
-        
-        Ok(())
     }
 }

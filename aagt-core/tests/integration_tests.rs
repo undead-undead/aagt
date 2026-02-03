@@ -57,21 +57,21 @@ fn test_memory_short_term() {
 
     let memory = ShortTermMemory::new(5);
     
-    memory.store("user1", Message::user("Message 1"));
-    memory.store("user1", Message::user("Message 2"));
-    memory.store("user1", Message::user("Message 3"));
+    memory.store("user1", None, Message::user("Message 1"));
+    memory.store("user1", None, Message::user("Message 2"));
+    memory.store("user1", None, Message::user("Message 3"));
     
-    assert_eq!(memory.message_count("user1"), 3);
+    assert_eq!(memory.message_count("user1", None), 3);
     
     // Test capacity limits
-    memory.store("user1", Message::user("Message 4"));
-    memory.store("user1", Message::user("Message 5"));
-    memory.store("user1", Message::user("Message 6"));
+    memory.store("user1", None, Message::user("Message 4"));
+    memory.store("user1", None, Message::user("Message 5"));
+    memory.store("user1", None, Message::user("Message 6"));
     
-    assert_eq!(memory.message_count("user1"), 5); // Should be capped
+    assert_eq!(memory.message_count("user1", None), 5); // Should be capped
     
     // Test retrieve
-    let messages = memory.retrieve("user1", 3);
+    let messages = memory.retrieve("user1", None, 3);
     assert_eq!(messages.len(), 3);
 }
 
@@ -93,9 +93,9 @@ async fn test_memory_long_term() {
         relevance: 1.0,
     };
     
-    memory.store_entry(entry).await.unwrap();
+    memory.store_entry(entry, None).await.unwrap();
     
-    let retrieved = memory.retrieve_by_tag("user1", "crypto", 10).await;
+    let retrieved = memory.retrieve_by_tag("user1", "crypto", None, 10).await;
     assert_eq!(retrieved.len(), 1);
     assert_eq!(retrieved[0].content, "User prefers SOL");
 }
@@ -248,9 +248,9 @@ async fn test_memory_manager() {
     let manager = MemoryManager::new().await.unwrap();
     
     // Store a message
-    manager.short_term.store("user1", Message::user("Hello"));
+    manager.short_term.store("user1", None, Message::user("Hello"));
     
     // Retrieve
-    let messages = manager.short_term.retrieve("user1", 10);
+    let messages = manager.short_term.retrieve("user1", None, 10);
     assert_eq!(messages.len(), 1);
 }
