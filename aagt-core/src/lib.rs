@@ -17,6 +17,7 @@
 
 pub mod agent;
 pub mod error;
+pub mod logging;
 pub mod memory;
 pub mod message;
 pub mod multi_agent;

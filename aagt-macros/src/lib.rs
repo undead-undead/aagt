@@ -126,16 +126,18 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             fn definition(&self) -> aagt_core::tool::ToolDefinition {
-                // Generate JSON schema from the args type at compile time
-                // For now, use a placeholder - in production, use schemars
+                let gen = schemars::gen::SchemaSettings::openapi3().into_generator();
+                let schema = gen.into_root_schema_for::<#args_type>();
+                let schema_json = serde_json::to_value(schema).unwrap_or(serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }));
+
                 aagt_core::tool::ToolDefinition {
                     name: #tool_name.to_string(),
                     description: #tool_description.to_string(),
-                    parameters: serde_json::json!({
-                        "type": "object",
-                        "properties": {},
-                        "required": []
-                    }),
+                    parameters: schema_json,
                 }
             }
 
@@ -209,14 +211,18 @@ pub fn derive_tool(input: TokenStream) -> TokenStream {
             }
 
             fn definition(&self) -> aagt_core::tool::ToolDefinition {
+                let gen = schemars::gen::SchemaSettings::openapi3().into_generator();
+                let schema = gen.into_root_schema_for::<#args_type>();
+                let schema_json = serde_json::to_value(schema).unwrap_or(serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }));
+
                 aagt_core::tool::ToolDefinition {
                     name: #name.to_string(),
                     description: #description.to_string(),
-                    parameters: serde_json::json!({
-                        "type": "object",
-                        "properties": {},
-                        "required": []
-                    }),
+                    parameters: schema_json,
                 }
             }
 

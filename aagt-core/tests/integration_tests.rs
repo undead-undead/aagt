@@ -75,11 +75,14 @@ fn test_memory_short_term() {
     assert_eq!(messages.len(), 3);
 }
 
-#[test]
-fn test_memory_long_term() {
+#[tokio::test]
+async fn test_memory_long_term() {
     use aagt_core::memory::{LongTermMemory, MemoryEntry};
-
-    let memory = LongTermMemory::new(100);
+    let path = std::path::PathBuf::from("test_integration.jsonl");
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+    let memory = LongTermMemory::new(100, path).await.unwrap();
     
     let entry = MemoryEntry {
         id: "test-1".to_string(),
@@ -90,9 +93,9 @@ fn test_memory_long_term() {
         relevance: 1.0,
     };
     
-    memory.store_entry(entry);
+    memory.store_entry(entry).await.unwrap();
     
-    let retrieved = memory.retrieve_by_tag("user1", "crypto", 10);
+    let retrieved = memory.retrieve_by_tag("user1", "crypto", 10).await;
     assert_eq!(retrieved.len(), 1);
     assert_eq!(retrieved[0].content, "User prefers SOL");
 }
@@ -106,9 +109,10 @@ fn test_risk_config() {
     assert!(config.max_daily_volume_usd > 0.0);
 }
 
-#[test]
-fn test_risk_manager_basic_checks() {
-    use aagt_core::risk::{RiskManager, RiskConfig, TradeContext};
+#[tokio::test]
+async fn test_risk_manager_basic_checks() {
+    use aagt_core::risk::{RiskManager, RiskConfig, TradeContext, InMemoryRiskStore};
+    use std::sync::Arc;
 
     let config = RiskConfig {
         max_single_trade_usd: 10_000.0,
@@ -119,7 +123,7 @@ fn test_risk_manager_basic_checks() {
         trade_cooldown_secs: 5,
     };
 
-    let manager = RiskManager::with_config(config);
+    let manager = RiskManager::with_config(config, Arc::new(InMemoryRiskStore));
 
     // Test a valid trade
     let valid_trade = TradeContext {
@@ -132,7 +136,7 @@ fn test_risk_manager_basic_checks() {
         is_flagged: false,
     };
 
-    assert!(manager.check_trade(&valid_trade).is_ok());
+    assert!(manager.check_and_reserve(&valid_trade).await.is_ok());
 
     // Test trade exceeding limit
     let large_trade = TradeContext {
@@ -145,7 +149,7 @@ fn test_risk_manager_basic_checks() {
         is_flagged: false,
     };
 
-    assert!(manager.check_trade(&large_trade).is_err());
+    assert!(manager.check_and_reserve(&large_trade).await.is_err());
 }
 
 #[test]
@@ -239,9 +243,9 @@ fn test_tool_call_creation() {
     assert_eq!(call.name, "get_price");
 }
 
-#[test]
-fn test_memory_manager() {
-    let manager = MemoryManager::new();
+#[tokio::test]
+async fn test_memory_manager() {
+    let manager = MemoryManager::new().await.unwrap();
     
     // Store a message
     manager.short_term.store("user1", Message::user("Hello"));

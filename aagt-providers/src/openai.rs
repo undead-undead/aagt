@@ -438,3 +438,56 @@ mod tests {
         assert_eq!(converted[2].role, "assistant");
     }
 }
+
+// --- Embeddings Implementation ---
+
+use aagt_core::rag::Embeddings;
+
+#[derive(Debug, Serialize)]
+struct EmbeddingRequest {
+    input: String,
+    model: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingResponse {
+    data: Vec<EmbeddingData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingData {
+    embedding: Vec<f32>,
+}
+
+#[async_trait]
+impl Embeddings for OpenAI {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let request = EmbeddingRequest {
+            input: text.to_string(),
+            model: "text-embedding-3-small".to_string(), // Default to small, cheap model
+        };
+
+        let response = self.client
+            .post(format!("{}/embeddings", self.base_url))
+            .headers(self.build_headers()?)
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(Error::ProviderApi(format!(
+                "OpenAI Embeddings API error {}: {}",
+                status, text
+            )));
+        }
+
+        let body: EmbeddingResponse = response.json().await
+            .map_err(|e| Error::ProviderApi(format!("Failed to parse embedding response: {}", e)))?;
+
+        body.data.first()
+            .map(|d| d.embedding.clone())
+            .ok_or_else(|| Error::ProviderApi("No embedding returned".to_string()))
+    }
+}

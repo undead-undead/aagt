@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// A condition that can trigger a strategy
 #[derive(Debug, Clone, Serialize, Deserialize)]

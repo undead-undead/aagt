@@ -6,10 +6,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
-use crate::message::Message;
 
 /// Role of an agent in a multi-agent system
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

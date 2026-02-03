@@ -8,10 +8,29 @@
 //! and mix AI agents with hard-coded logic (e.g. risk checks).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::{info, warn, error, instrument, span, Level};
+use std::time::Duration;
+
+/// Retry policy for pipeline steps
+#[derive(Debug, Clone, Copy)]
+pub enum RetryPolicy {
+    /// No retry, fail immediately
+    None,
+    /// Retry N times with no wait
+    Fixed(u32),
+    /// Retry N times with fixed wait
+    FixedDelay(u32, Duration),
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self::None
+    }
+}
 
 /// Shared execution context passed between steps
 #[derive(Debug, Default, Clone)]
@@ -56,8 +75,11 @@ impl Context {
         self.log(format!("ABORTED: {}", reason));
     }
 
-    /// Add a log entry
+    /// Add a log entry (Capped at 50 to prevent memory leaks)
     pub fn log(&mut self, message: impl Into<String>) {
+        if self.trace.len() >= 50 {
+            self.trace.remove(0);
+        }
         self.trace.push(message.into());
     }
 }
@@ -74,8 +96,8 @@ pub trait Step: Send + Sync {
 
 /// Linear execution pipeline
 pub struct Pipeline {
-    /// Steps to execute
-    steps: Vec<Box<dyn Step>>,
+    /// Steps to execute and their retry policies
+    steps: Vec<(Box<dyn Step>, RetryPolicy)>,
     /// Name of this pipeline
     name: String,
 }
@@ -89,33 +111,72 @@ impl Pipeline {
         }
     }
 
-    /// Add a step to the pipeline
+    /// Add a step to the pipeline with default retry policy (None)
     pub fn add_step(mut self, step: impl Step + 'static) -> Self {
-        self.steps.push(Box::new(step));
+        self.steps.push((Box::new(step), RetryPolicy::default()));
+        self
+    }
+
+    /// Add a step with a specific retry policy
+    pub fn add_step_with_retry(mut self, step: impl Step + 'static, policy: RetryPolicy) -> Self {
+        self.steps.push((Box::new(step), policy));
         self
     }
 
     /// Execute the pipeline
+    #[instrument(skip(self, input), fields(pipeline = %self.name))]
     pub async fn run(&self, input: impl Into<String>) -> Result<Context> {
         let mut ctx = Context::new(input);
         
+        info!("Pipeline started");
         ctx.log(format!("Pipeline '{}' started", self.name));
 
-        for step in &self.steps {
+        for (step, policy) in &self.steps {
             if ctx.aborted {
+                info!("Pipeline aborted");
                 ctx.log("Skipping remaining steps due to abort");
                 break;
             }
 
+            let span = span!(Level::INFO, "step", name = %step.name());
+            let _enter = span.enter();
+
             ctx.log(format!("Running step: {}", step.name()));
             
-            // Execute the step
-            if let Err(e) = step.execute(&mut ctx).await {
-                ctx.log(format!("ERROR in {}: {}", step.name(), e));
-                return Err(e);
+            // Execute with retry
+            let mut attempts = 0;
+            loop {
+                match step.execute(&mut ctx).await {
+                    Ok(_) => break,
+                    Err(e) => {
+                        attempts += 1;
+                        let should_retry = match policy {
+                            RetryPolicy::None => false,
+                            RetryPolicy::Fixed(max) => attempts <= *max,
+                            RetryPolicy::FixedDelay(max, delay) => {
+                                if attempts <= *max {
+                                    tokio::time::sleep(*delay).await;
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                        };
+
+                        if should_retry {
+                            warn!(error = %e, attempt = attempts, "Step failed, retrying");
+                            ctx.log(format!("WARNING: Step {} failed (attempt {}), retrying: {}", step.name(), attempts, e));
+                        } else {
+                            error!(error = %e, "Step failed permanently");
+                            ctx.log(format!("ERROR in {}: {}", step.name(), e));
+                            return Err(e);
+                        }
+                    }
+                }
             }
         }
 
+        info!("Pipeline finished");
         ctx.log(format!("Pipeline '{}' finished", self.name));
         Ok(ctx)
     }
