@@ -96,26 +96,118 @@ impl<P: Provider> Agent<P> {
 
     /// Send messages and get a response (non-streaming)
     #[instrument(skip(self, messages), fields(model = %self.config.model, message_count = messages.len()))]
-    pub async fn chat(&self, messages: Vec<Message>) -> Result<String> {
-        if let Some(last) = messages.last() {
-             // Only emit thinking if not already emitted by prompt()
-             if last.role == Role::User {
-                // We blindly emit thinking here for chat calls too
-                self.emit(AgentEvent::Thinking { prompt: last.content.as_text() });
-             }
+    pub async fn chat(&self, mut messages: Vec<Message>) -> Result<String> {
+        let mut steps = 0;
+        const MAX_STEPS: usize = 15;
+
+        loop {
+            if steps >= MAX_STEPS {
+                return Err(Error::agent_config("Max agent steps exceeded"));
+            }
+            steps += 1;
+
+            if let Some(last) = messages.last() {
+                 if last.role == Role::User {
+                    self.emit(AgentEvent::Thinking { prompt: last.content.as_text() });
+                 }
+            }
+
+            info!("Agent starting chat completion (step {})", steps);
+
+            let mut stream = self.stream_chat(messages.clone()).await?;
+            
+            let mut full_text = String::new();
+            let mut tool_calls = Vec::new();
+
+            let mut stream_inner = stream.into_inner();
+
+            // Consume the stream
+            use futures::StreamExt;
+            while let Some(chunk) = stream_inner.next().await {
+                match chunk? {
+                    crate::streaming::StreamingChoice::Message(text) => {
+                        full_text.push_str(&text);
+                    }
+                    crate::streaming::StreamingChoice::ToolCall { id, name, arguments } => {
+                        tool_calls.push((id, name, arguments));
+                    }
+                     crate::streaming::StreamingChoice::ParallelToolCalls(map) => {
+                         // Flatten parallel calls
+                         // Map is index -> ToolCall. Order by index.
+                         let mut sorted: Vec<_> = map.into_iter().collect();
+                         sorted.sort_by_key(|(k,_)| *k);
+                         for (_, tc) in sorted {
+                             // tc.arguments is passed as Value in streaming choice from OpenAI
+                             // But wait, StreamingChoice definition in streaming.rs might differ from my implementation in openai.rs
+                             // Let's assume openai.rs implementation (Value) is correct and reflects StreamingChoice
+                             tool_calls.push((tc.id, tc.name, tc.arguments));
+                         }
+                    }
+                    _ => {}
+                }
+            }
+
+            // If no tool calls, we are done
+            if tool_calls.is_empty() {
+                self.emit(AgentEvent::Response { content: full_text.clone() });
+                return Ok(full_text);
+            }
+
+            // We have tool calls.
+            // 1. Append Assistant Message (Thought + Calls) to history
+            let mut parts = Vec::new();
+            if !full_text.is_empty() {
+                parts.push(crate::message::ContentPart::Text { text: full_text.clone() });
+            }
+            for (id, name, args) in &tool_calls {
+                parts.push(crate::message::ContentPart::ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: args.clone(),
+                });
+            }
+            messages.push(Message {
+                role: Role::Assistant,
+                name: None,
+                content: Content::Parts(parts),
+            });
+
+            // 2. Execute Tools (Parallel)
+            // Use futures::future::join_all for concurrency
+            let mut futures = Vec::new();
+            
+            for (id, name, args) in tool_calls {
+                futures.push(async move {
+                    let args_str = args.to_string();
+                    let result = self.call_tool(&name, &args_str).await; 
+                    
+                    let output = match result {
+                        Ok(s) => s,
+                        Err(e) => format!("Error: {}", e),
+                    };
+
+                    (id, output, name)
+                });
+            }
+            
+            let results = futures::future::join_all(futures).await;
+
+            // 3. Append Tool Results to history
+            // Each result is a separate Tool message
+            for (id, output, name) in results {
+                 messages.push(Message {
+                    role: Role::Tool,
+                    name: None, // Optional name on Message, but we can set it in Content if needed
+                    content: Content::Parts(vec![crate::message::ContentPart::ToolResult {
+                        tool_call_id: id,
+                        content: output,
+                        name: Some(name),
+                    }]),
+                });
+            }
+            
+            // Loop continues to generate response based on tool results
         }
-
-        info!("Agent starting chat completion");
-
-        let stream = self.stream_chat(messages).await?;
-        
-        // Collect stream response
-        // Note: collecting text consumes the stream.
-        // Ideally we would want to emit tokens as they come, but for now we emit full response at end.
-        let response = stream.collect_text().await?;
-
-        self.emit(AgentEvent::Response { content: response.clone() });
-        Ok(response)
     }
 
     /// Stream a prompt response

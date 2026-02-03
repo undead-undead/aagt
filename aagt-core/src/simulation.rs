@@ -3,8 +3,9 @@
 //! Allows simulating trades before execution to estimate costs, slippage, etc.
 
 use serde::{Deserialize, Serialize};
-
+use std::sync::Arc;
 use crate::error::Result;
+use async_trait::async_trait;
 
 /// Result of a trade simulation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,7 +65,7 @@ pub struct SimulationRequest {
 }
 
 /// Trait for implementing simulators
-#[async_trait::async_trait]
+#[async_trait]
 pub trait Simulator: Send + Sync {
     /// Simulate a trade
     async fn simulate(&self, request: &SimulationRequest) -> Result<SimulationResult>;
@@ -73,10 +74,29 @@ pub trait Simulator: Send + Sync {
     fn supported_chains(&self) -> Vec<String>;
 }
 
+/// Abstract pricing source for simulations
+#[async_trait]
+pub trait PriceSource: Send + Sync {
+    /// Get exact price in USD
+    async fn get_price_usd(&self, token: &str) -> Result<f64>;
+    /// Get liquidity in USD for a pair
+    async fn get_liquidity_usd(&self, token_a: &str, token_b: &str) -> Result<f64>;
+}
+
+/// Mock Price Source for testing/default
+pub struct MockPriceSource;
+#[async_trait]
+impl PriceSource for MockPriceSource {
+    async fn get_price_usd(&self, _token: &str) -> Result<f64> { Ok(1.0) }
+    async fn get_liquidity_usd(&self, _token_a: &str, _token_b: &str) -> Result<f64> { Ok(10_000_000.0) }
+}
+
 /// A basic simulator that estimates based on liquidity
 pub struct BasicSimulator {
     /// Default gas cost per chain
     default_gas_usd: f64,
+    /// Price source
+    price_source: Arc<dyn PriceSource>,
 }
 
 impl BasicSimulator {
@@ -84,16 +104,26 @@ impl BasicSimulator {
     pub fn new() -> Self {
         Self {
             default_gas_usd: 0.5,
+            price_source: Arc::new(MockPriceSource),
+        }
+    }
+
+    /// Create with custom price source
+    pub fn with_source(source: Arc<dyn PriceSource>) -> Self {
+        Self {
+            default_gas_usd: 0.5,
+            price_source: source,
         }
     }
 
     /// Estimate price impact based on amount and liquidity
-    fn estimate_price_impact(amount: f64, liquidity: f64) -> f64 {
+    fn estimate_price_impact(amount_usd: f64, liquidity_usd: f64) -> f64 {
         // Simple constant product formula approximation
-        if liquidity <= 0.0 {
-            return 100.0; // Max impact for no liquidity
+        // Impact ~= Amount / Liquidity
+        if liquidity_usd <= 0.0 {
+            return 100.0;
         }
-        (amount / liquidity * 100.0).min(100.0)
+        (amount_usd / liquidity_usd * 100.0).min(100.0)
     }
 }
 
@@ -103,15 +133,28 @@ impl Default for BasicSimulator {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Simulator for BasicSimulator {
     async fn simulate(&self, request: &SimulationRequest) -> Result<SimulationResult> {
-        // This is a mock implementation
-        // In production, this would call actual DEX APIs
+        // 1. Get Prices
+        let price_from = self.price_source.get_price_usd(&request.from_token).await.unwrap_or(1.0);
+        let amount_usd = request.amount * price_from;
         
-        let price_impact = 0.3; // Mock 0.3% impact
-        let output = request.amount * 0.997; // Mock 0.3% less output
-        let min_output = output * (1.0 - request.slippage_tolerance / 100.0);
+        let price_to = self.price_source.get_price_usd(&request.to_token).await.unwrap_or(1.0);
+        
+        // 2. Get Liquidity and Impact
+        let liquidity = self.price_source.get_liquidity_usd(&request.from_token, &request.to_token)
+            .await.unwrap_or(1_000_000.0);
+            
+        let price_impact = Self::estimate_price_impact(amount_usd, liquidity);
+        
+        // 3. Calculate Output
+        // Output = (Input * PriceFrom / PriceTo) * (1 - Impact - Fee)
+        // Fee mock 0.3%
+        let gross_output_tokens = (request.amount * price_from) / price_to;
+        let net_output_tokens = gross_output_tokens * (1.0 - 0.003) * (1.0 - (price_impact / 100.0));
+        
+        let min_output = net_output_tokens * (1.0 - request.slippage_tolerance / 100.0);
 
         let mut warnings = Vec::new();
         if price_impact > 1.0 {
@@ -123,7 +166,7 @@ impl Simulator for BasicSimulator {
             from_token: request.from_token.clone(),
             to_token: request.to_token.clone(),
             input_amount: request.amount,
-            output_amount: output,
+            output_amount: net_output_tokens,
             price_impact_percent: price_impact,
             gas_cost_usd: self.default_gas_usd,
             min_output,

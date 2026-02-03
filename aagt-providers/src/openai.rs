@@ -84,7 +84,7 @@ struct ChatRequest {
 #[derive(Debug, Serialize)]
 struct OpenAIMessage {
     role: String,
-    content: String,
+    content: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -163,7 +163,7 @@ impl OpenAI {
         if let Some(prompt) = system_prompt {
             result.push(OpenAIMessage {
                 role: "system".to_string(),
-                content: prompt.to_string(),
+                content: serde_json::Value::String(prompt.to_string()),
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -179,17 +179,45 @@ impl OpenAI {
                 Role::Tool => "tool",
             };
 
-            let mut content_string = String::new();
             let mut tool_calls = Vec::new();
             let mut tool_call_id = None;
+            let final_content: serde_json::Value;
 
             match msg.content {
-                Content::Text(text) => content_string = text,
+                Content::Text(text) => {
+                    final_content = serde_json::Value::String(text);
+                },
                 Content::Parts(parts) => {
+                    let mut json_parts = Vec::new();
+                    let mut text_acc = String::new();
+                    
                     for part in parts {
                         match part {
-                            aagt_core::message::ContentPart::Text { text } => content_string.push_str(&text),
-                            aagt_core::message::ContentPart::ToolCall { id, name, arguments } => {
+                            aagt_core::message::ContentPart::Text { text } => {
+                                text_acc.push_str(&text);
+                                json_parts.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                }));
+                            },
+                            aagt_core::message::ContentPart::Image { source } => {
+                                // Fix #8: Support Images (Url and Base64)
+                                let url = match source {
+                                    aagt_core::message::ImageSource::Url { url } => url,
+                                    aagt_core::message::ImageSource::Base64 { media_type, data } => {
+                                        format!("data:{};base64,{}", media_type, data)
+                                    }
+                                };
+                                
+                                json_parts.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": url
+                                        // "detail": "auto" // Default
+                                    }
+                                }));
+                            },
+                             aagt_core::message::ContentPart::ToolCall { id, name, arguments } => {
                                 tool_calls.push(OpenAIToolCall {
                                     id,
                                     call_type: "function".to_string(),
@@ -200,21 +228,34 @@ impl OpenAI {
                                 });
                             },
                             aagt_core::message::ContentPart::ToolResult { tool_call_id: id, content, .. } => {
-                                // OpenAI expects one message per tool result
-                                // If we have multiple results in one message (not standard AAGT but possible),
-                                // we might need to split. But typically AAGT Message::tool_result is one result.
                                 tool_call_id = Some(id);
-                                content_string = content;
+                                text_acc = content; // Tool result content is simple string usually
                             },
-                            _ => {} // Images not supported in this basic impl yet
+                            // Audio/Video skipped for now
+                            _ => {}
                         }
+                    }
+                    
+                    if tool_call_id.is_some() || (!tool_calls.is_empty()) {
+                        // If tool related, content is usually null or the text string
+                         if text_acc.is_empty() {
+                             final_content = serde_json::Value::Null;
+                         } else {
+                             final_content = serde_json::Value::String(text_acc);
+                         }
+                    } else if json_parts.iter().any(|p| p["type"] == "image_url") {
+                        // Multi-modal content
+                         final_content = serde_json::Value::Array(json_parts);
+                    } else {
+                        // Simple text
+                        final_content = serde_json::Value::String(text_acc);
                     }
                 }
             }
 
             result.push(OpenAIMessage {
                 role: role.to_string(),
-                content: content_string, // For tool results, this is the result. For assistant, this is thought/text.
+                content: final_content,
                 name: msg.name,
                 tool_call_id,
                 tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
@@ -298,18 +339,19 @@ where
 {
     // Tool call accumulator state
     struct ToolCallState {
-        id: String,
-        name: String,
+        id: Option<String>,
+        name: Option<String>,
         arguments: String,
     }
 
     let sse_buffer = crate::utils::SseBuffer::new();
     let string_buffer = String::new();
-    let current_tool: Option<ToolCallState> = None;
+    // Map of index -> ToolCallState for parallel tool calls
+    let current_tools: std::collections::HashMap<usize, ToolCallState> = std::collections::HashMap::new();
 
     futures::stream::unfold(
-        (stream, sse_buffer, string_buffer, current_tool),
-        move |(mut stream, mut bytes_buffer, mut text_buffer, mut current_tool)| async move {
+        (stream, sse_buffer, string_buffer, current_tools),
+        move |(mut stream, mut bytes_buffer, mut text_buffer, mut current_tools)| async move {
             loop {
                 // Try to extract a complete SSE message from buffer
                 if let Some(pos) = text_buffer.find("\n\n") {
@@ -319,7 +361,7 @@ where
                     // Parse the SSE message
                     if let Some(data) = message.strip_prefix("data: ") {
                         if data.trim() == "[DONE]" {
-                            return Some((Ok(StreamingChoice::Done), (stream, bytes_buffer, text_buffer, current_tool)));
+                            return Some((Ok(StreamingChoice::Done), (stream, bytes_buffer, text_buffer, current_tools)));
                         }
 
                         match serde_json::from_str::<StreamChunk>(data) {
@@ -330,7 +372,7 @@ where
                                         if !content.is_empty() {
                                             return Some((
                                                 Ok(StreamingChoice::Message(content.clone())),
-                                                (stream, bytes_buffer, text_buffer, current_tool),
+                                                (stream, bytes_buffer, text_buffer, current_tools),
                                             ));
                                         }
                                     }
@@ -338,40 +380,57 @@ where
                                     // Check for tool calls
                                     if let Some(tool_calls) = &choice.delta.tool_calls {
                                         for tc in tool_calls {
-                                            // Start of new tool call
+                                            let index = tc.index.unwrap_or(0);
+                                            let state = current_tools.entry(index).or_insert(ToolCallState {
+                                                id: None,
+                                                name: None,
+                                                arguments: String::new(),
+                                            });
+
+                                            // Update ID
                                             if let Some(id) = &tc.id {
-                                                current_tool = Some(ToolCallState {
-                                                    id: id.clone(),
-                                                    name: tc.function.as_ref()
-                                                        .and_then(|f| f.name.clone())
-                                                        .unwrap_or_default(),
-                                                    arguments: String::new(),
-                                                });
+                                                state.id = Some(id.clone());
                                             }
 
-                                            // Accumulate arguments
-                                            if let Some(ref mut tool) = current_tool {
-                                                if let Some(func) = &tc.function {
-                                                    if let Some(args) = &func.arguments {
-                                                        tool.arguments.push_str(args);
-                                                    }
+                                            // Update Name
+                                            if let Some(func) = &tc.function {
+                                                if let Some(name) = &func.name {
+                                                    state.name = Some(name.clone());
+                                                }
+                                                // Update Arguments
+                                                if let Some(args) = &func.arguments {
+                                                    state.arguments.push_str(args);
                                                 }
                                             }
                                         }
                                     }
 
-                                    // Check if tool call is complete
+                                    // Check if tool calls are complete
                                     if choice.finish_reason.as_deref() == Some("tool_calls") {
-                                        if let Some(tool) = current_tool.take() {
-                                            let args: serde_json::Value = serde_json::from_str(&tool.arguments)
-                                                .unwrap_or(serde_json::Value::Null);
+                                        // We need to drain the tools and emit them.
+                                        // Since we can only emit one StreamingChoice per iteration of unfold,
+                                        // we'll emit a single ParallelToolCalls event containing all of them.
+                                        
+                                        let mut tools_map = std::collections::HashMap::new();
+                                        
+                                        // Drain all tools
+                                        for (index, state) in current_tools.drain() {
+                                            if let (Some(id), Some(name)) = (state.id, state.name) {
+                                                 let args: serde_json::Value = serde_json::from_str(&state.arguments)
+                                                    .unwrap_or(serde_json::Value::Null);
+                                                 
+                                                 tools_map.insert(index, aagt_core::message::ToolCall {
+                                                    id,
+                                                    name,
+                                                    arguments: args, 
+                                                 });
+                                            }
+                                        }
+
+                                        if !tools_map.is_empty() {
                                             return Some((
-                                                Ok(StreamingChoice::ToolCall {
-                                                    id: tool.id,
-                                                    name: tool.name,
-                                                    arguments: args,
-                                                }),
-                                                (stream, bytes_buffer, text_buffer, None),
+                                                Ok(StreamingChoice::ParallelToolCalls(tools_map)),
+                                                (stream, bytes_buffer, text_buffer, current_tools),
                                             ));
                                         }
                                     }
@@ -382,6 +441,7 @@ where
                             }
                         }
                     }
+                    // Loop again to process next message in buffer *before* reading more from stream
                     continue;
                 }
 
@@ -395,7 +455,7 @@ where
                             Err(e) => {
                                 return Some((
                                     Err(e),
-                                    (stream, bytes_buffer, text_buffer, current_tool),
+                                    (stream, bytes_buffer, text_buffer, current_tools),
                                 ));
                             }
                         }
@@ -403,7 +463,7 @@ where
                     Some(Err(e)) => {
                         return Some((
                             Err(Error::Http(e)),
-                            (stream, bytes_buffer, text_buffer, current_tool),
+                            (stream, bytes_buffer, text_buffer, current_tools),
                         ));
                     }
                     None => {

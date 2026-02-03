@@ -144,14 +144,19 @@ impl Pipeline {
             }
 
             let span = span!(Level::INFO, "step", name = %step.name());
-            let _enter = span.enter();
-
-            ctx.log(format!("Running step: {}", step.name()));
+            
+            // Log with span context (Sync)
+            {
+                let _enter = span.enter();
+                ctx.log(format!("Running step: {}", step.name()));
+            }
             
             // Execute with retry
             let mut attempts = 0;
             loop {
-                match step.execute(&mut ctx).await {
+                // Instrument the async execution
+                use tracing::Instrument;
+                match step.execute(&mut ctx).instrument(span.clone()).await {
                     Ok(_) => break,
                     Err(e) => {
                         attempts += 1;
@@ -168,6 +173,8 @@ impl Pipeline {
                             }
                         };
 
+                        // Log error with span context
+                        let _enter = span.enter();
                         if should_retry {
                             warn!(error = %e, attempt = attempts, "Step failed, retrying");
                             ctx.log(format!("WARNING: Step {} failed (attempt {}), retrying: {}", step.name(), attempts, e));

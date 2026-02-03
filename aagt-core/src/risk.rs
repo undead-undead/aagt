@@ -59,17 +59,27 @@ impl RiskStateStore for FileRiskStore {
         let path = self.path.clone();
         let states = states.clone(); 
 
+        // Fix #3: Atomic Write Pattern (Write tmp -> Rename)
         tokio::task::spawn_blocking(move || {
-            let tmp_path = path.with_extension("tmp");
-            let file = std::fs::File::create(&tmp_path)
-                .map_err(|e| Error::Internal(format!("Failed to create tmp risk file: {}", e)))?;
-            let writer = std::io::BufWriter::new(file);
+            let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+            
+            // Scope for file to ensure it closes before rename
+            {
+                let file = std::fs::File::create(&tmp_path)
+                    .map_err(|e| Error::Internal(format!("Failed to create tmp risk file: {}", e)))?;
+                let writer = std::io::BufWriter::new(file);
+                
+                serde_json::to_writer_pretty(writer, &states)
+                    .map_err(|e| Error::Internal(format!("Failed to serialize risk state: {}", e)))?;
+                // File closes here
+            }
 
-            serde_json::to_writer_pretty(writer, &states)
-                .map_err(|e| Error::Internal(format!("Failed to serialize risk state: {}", e)))?;
-
-            std::fs::rename(tmp_path, &path)
-                .map_err(|e| Error::Internal(format!("Failed to rename risk file: {}", e)))?;
+            std::fs::rename(&tmp_path, &path)
+                .map_err(|e| {
+                    // Try to clean up tmp file if rename fails
+                    let _ = std::fs::remove_file(&tmp_path);
+                    Error::Internal(format!("Failed to rename risk file: {}", e))
+                })?;
             
             Ok::<(), Error>(())
         }).await.map_err(|e| Error::Internal(format!("Join error: {}", e)))??;
@@ -172,7 +182,7 @@ pub struct UserState {
     pub pending_volume_usd: f64,
     /// Last trade timestamp
     pub last_trade: Option<DateTime<Utc>>,
-    /// Volume reset time
+    /// Volume reset time (Last date processed)
     pub volume_reset: DateTime<Utc>,
 }
 
@@ -215,12 +225,6 @@ impl RiskActor {
     }
 
     async fn handle_check_and_reserve(&mut self, context: TradeContext, checks: &[Arc<dyn RiskCheck>]) -> Result<()> {
-         // 0. Multi-process reload check (Simple version: always reload or check timestamp)
-         // For now, let's just reload to be 100% safe in multi-process scenarios
-         // 0. Multi-process reload check REMOVED for performance and InMemory correctness.
-         // If you need multi-process sync, use a database or implement a file watcher.
-         // let _ = self.handle_load().await;
-
          // 1. Stateless Checks
         if context.amount_usd > self.config.max_single_trade_usd {
             return Err(Error::RiskLimitExceeded {
@@ -251,10 +255,15 @@ impl RiskActor {
         // 3. Stateful Checks
         let state = self.state.entry(context.user_id.clone()).or_default();
 
-        if Utc::now() - state.volume_reset > chrono::Duration::seconds(86400) {
+        // Fix #4: UTC Midnight Reset
+        let now = Utc::now();
+        let today = now.date_naive();
+        let last_reset = state.volume_reset.date_naive();
+
+        if today > last_reset {
             state.daily_volume_usd = 0.0;
             state.pending_volume_usd = 0.0;
-            state.volume_reset = Utc::now();
+            state.volume_reset = now;
         }
 
         let projected = state.daily_volume_usd + state.pending_volume_usd + context.amount_usd;
@@ -268,7 +277,7 @@ impl RiskActor {
 
         if let Some(last) = state.last_trade {
              let cd = self.config.trade_cooldown_secs as i64;
-             let elapsed = Utc::now() - last;
+             let elapsed = now - last;
              if elapsed < chrono::Duration::seconds(cd) {
                  return Err(Error::risk_check_failed("cooldown", "Cooldown active"));
              }
@@ -280,15 +289,28 @@ impl RiskActor {
     }
 
     async fn handle_commit(&mut self, user_id: String, amount: f64) -> Result<()> {
-        let state = self.state.entry(user_id).or_default();
+        let state = self.state.entry(user_id.clone()).or_default();
+        
+        let old_pending = state.pending_volume_usd;
+        let old_daily = state.daily_volume_usd;
+        let old_last = state.last_trade;
+
         state.pending_volume_usd = (state.pending_volume_usd - amount).max(0.0);
         state.daily_volume_usd += amount;
         state.last_trade = Some(Utc::now());
 
-        // FORCE SAVE (Durability)
+        // Fix #1: Strict Commit (Rollback on persistence failure)
         if let Err(e) = self.store.save(&self.state).await {
-            tracing::error!("CRITICAL: Failed to persist risk state: {}", e);
-            // We still succeed the Commit in memory, but warn heavily
+            tracing::error!("CRITICAL: Failed to persist risk state for {}: {}. Rolling back memory.", user_id, e);
+            
+            // Rollback in-memory state to maintain consistency with disk
+            if let Some(s) = self.state.get_mut(&user_id) {
+                s.pending_volume_usd = old_pending;
+                s.daily_volume_usd = old_daily;
+                s.last_trade = old_last;
+            }
+            
+            return Err(Error::Internal(format!("Risk persistence failed: {}", e)));
         }
         Ok(())
     }

@@ -216,11 +216,16 @@ pub trait StrategyStore: Send + Sync {
 /// Simple JSON file store for strategies
 pub struct FileStrategyStore {
     path: std::path::PathBuf,
+    /// Lock to prevent race conditions during read-modify-write cycles
+    lock: tokio::sync::Mutex<()>,
 }
 
 impl FileStrategyStore {
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self { 
+            path: path.into(),
+            lock: tokio::sync::Mutex::new(()),
+        }
     }
 }
 
@@ -240,8 +245,9 @@ impl StrategyStore for FileStrategyStore {
     }
 
     async fn save(&self, strategy: &Strategy) -> Result<()> {
-        // Load, update, save (Atomic-ish via rename)
-        // Optimization: Use a proper DB if this gets slow, but for <100 strategies JSON is fine.
+        // Acquire lock to ensure exclusive read-modify-write access
+        let _guard = self.lock.lock().await;
+
         let mut strategies = self.load().await?;
         
         if let Some(pos) = strategies.iter().position(|s| s.id == strategy.id) {
@@ -254,6 +260,8 @@ impl StrategyStore for FileStrategyStore {
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
+        let _guard = self.lock.lock().await;
+
         let mut strategies = self.load().await?;
         if let Some(pos) = strategies.iter().position(|s| s.id == id) {
             strategies.remove(pos);
