@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aagt-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "aagt-macros"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "aagt-providers"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aagt-core",
  "async-trait",
