@@ -267,20 +267,23 @@ impl Memory for LongTermMemory {
     }
     
     fn clear(&self, user_id: &str, agent_id: Option<&str>) {
-        // Async issue again.
+        // Fix #2: OOM Risk
+        // Use find_ids to avoid loading content for deletion logic
         let uid = user_id.to_string();
         let aid = agent_id.map(|s| s.to_string());
         let store = self.store.clone();
         
         tokio::spawn(async move {
-            let all = store.get_all().await;
-            for doc in all {
-                if doc.metadata.get("user_id").map(|s| s.as_str()) == Some(&uid) {
-                    if let Some(ref target_aid) = aid {
-                        if doc.metadata.get("agent_id") != Some(target_aid) { continue; }
-                    }
-                    store.delete(&doc.id).await.ok();
+            let ids_to_delete = store.find_ids(move |idx| {
+                if idx.get_metadata("user_id") != Some(&uid) { return false; }
+                if let Some(ref target_aid) = aid {
+                    if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
                 }
+                true
+            }).await;
+
+            for id in ids_to_delete {
+                store.delete(&id).await.ok();
             }
         });
     }

@@ -25,6 +25,7 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 use rayon::prelude::*;
 use std::os::unix::fs::FileExt;
 use futures::FutureExt;
+use std::collections::HashSet;
 
 /// Configuration for FileStore
 #[derive(Debug, Clone)]
@@ -81,8 +82,8 @@ enum StoreMessage {
     },
     /// Trigger compaction (rewrite file to remove deleted items)
     Compact {
-        indices: Vec<IndexEntry>,
-        reply: oneshot::Sender<Result<Vec<u64>>> // Returns new offsets corresponding to input indices
+        deleted_ids: HashSet<String>,
+        reply: oneshot::Sender<Result<HashMap<String, u64>>> // Returns ID -> New Offset
     },
     /// Save index snapshot to disk
     SaveSnapshot {
@@ -115,34 +116,52 @@ impl FileStoreActor {
         Ok((offset, length))
     }
 
-    async fn handle_compact(&self, indices: Vec<IndexEntry>) -> Result<Vec<u64>> {
+    async fn handle_compact(&self, deleted_ids: HashSet<String>) -> Result<HashMap<String, u64>> {
         let tmp_path = self.path.with_extension("compact");
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .await?;
-
-        let mut new_offsets = Vec::with_capacity(indices.len());
-        let mut current_offset = 0u64;
-
-        // We need a separate reader for the old file
-        // NOTE: This might fail if the file is massive and OS limits open files, but we open one reader here.
-        // Optimization: buffer reads? 
         
-        for idx in &indices {
-             // Read from OLD file using static helper
-             let content = Self::read_one(&self.path, idx.offset, idx.length).await?;
-             let line = serde_json::to_string(&content)
-                 .map_err(|e| Error::MemoryStorage(format!("JSON error: {}", e)))? + "\n";
-             
-             file.write_all(line.as_bytes()).await?;
-             new_offsets.push(current_offset);
-             current_offset += line.len() as u64;
+        let mut reader = tokio::io::BufReader::new(
+            tokio::fs::File::open(&self.path).await?
+        );
+        
+        let mut writer = tokio::io::BufWriter::new(
+            tokio::fs::File::create(&tmp_path).await?
+        );
+
+        let mut new_offsets = HashMap::new();
+        let mut current_offset = 0u64;
+        let mut buffer = String::new();
+
+        loop {
+            buffer.clear();
+            let bytes_read = reader.read_line(&mut buffer).await?;
+            if bytes_read == 0 {
+                break;
+            }
+
+            // Sniff ID without full parse if possible, or just parse generic
+            // Using a minimal struct for ID extraction is reasonably fast
+            #[derive(Deserialize)]
+            struct DocHeader { id: String }
+            
+            if let Ok(header) = serde_json::from_str::<DocHeader>(&buffer) {
+                if !deleted_ids.contains(&header.id) {
+                    // Keep it
+                    writer.write_all(buffer.as_bytes()).await?;
+                    new_offsets.insert(header.id, current_offset);
+                    current_offset += buffer.len() as u64;
+                }
+            } else {
+                 // Skip malformed lines or pass them through? 
+                 // If we pass through, we might keep garbage. Safest is to skip unless we want to preserve corruption?
+                 // Let's skip.
+                 tracing::warn!("Compaction found malformed line");
+            }
         }
 
-        file.flush().await?;
+        writer.flush().await?;
+        drop(writer); // Ensure closed
+        drop(reader); // Ensure closed
+        
         tokio::fs::rename(tmp_path, &self.path).await?;
         
         Ok(new_offsets)
@@ -185,8 +204,8 @@ pub struct FileStore {
     sender: mpsc::Sender<StoreMessage>,
     /// Persistent read handle for efficient random access
     reader: Arc<std::sync::RwLock<std::fs::File>>,
-    /// Track deleted items for smart compaction
-    deleted_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Track deleted items for smart compaction (Blocklist)
+    deleted_ids: Arc<RwLock<HashSet<String>>>,
 }
 
 impl FileStore {
@@ -228,8 +247,8 @@ impl FileStore {
                                 let res = actor.handle_append(line).await;
                                 let _ = reply.send(res);
                             }
-                            StoreMessage::Compact { indices, reply } => {
-                                let res = actor.handle_compact(indices).await;
+                            StoreMessage::Compact { deleted_ids, reply } => {
+                                let res = actor.handle_compact(deleted_ids).await;
                                 let _ = reply.send(res);
                             }
                             StoreMessage::SaveSnapshot { indices } => {
@@ -254,7 +273,7 @@ impl FileStore {
             embedder: None,
             sender: tx,
             reader: Arc::new(std::sync::RwLock::new(reader)),
-            deleted_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            deleted_ids: Arc::new(RwLock::new(HashSet::new())),
         };
         
         store.load().await?;
@@ -419,6 +438,17 @@ impl FileStore {
 
         self.hydrate_results(matches).await
     }
+
+    /// Find document IDs using a custom predicate on the IndexEntry (Fast, No IO)
+    pub async fn find_ids<F>(&self, predicate: F) -> Vec<String>
+    where F: Fn(&IndexEntry) -> bool
+    {
+        let indices = self.indices.read().await;
+        indices.iter()
+            .filter(|idx| predicate(idx))
+            .map(|idx| idx.id.clone())
+            .collect()
+    }
     
     /// Retrieve all documents (Manual iteration - expensive)
     pub async fn get_all(&self) -> Vec<Document> {
@@ -456,10 +486,10 @@ impl FileStore {
 
     /// Trigger manual compaction to reclaim disk space
     pub async fn compact(&self) -> Result<()> {
-        let indices_to_keep = self.indices.read().await.clone();
+        let deleted_snapshot = self.deleted_ids.read().await.clone();
         
         let (tx, rx) = oneshot::channel();
-        self.sender.send(StoreMessage::Compact { indices: indices_to_keep, reply: tx }).await
+        self.sender.send(StoreMessage::Compact { deleted_ids: deleted_snapshot.clone(), reply: tx }).await
             .map_err(|_| Error::Internal("FileStore actor closed".to_string()))?;
             
         let new_offsets = rx.await
@@ -467,9 +497,9 @@ impl FileStore {
 
         // Update offsets in memory
         let mut indices_mut = self.indices.write().await;
-        for (i, offset) in new_offsets.into_iter().enumerate() {
-            if i < indices_mut.len() {
-                 indices_mut[i].offset = offset;
+        for idx in indices_mut.iter_mut() {
+            if let Some(new_offset) = new_offsets.get(&idx.id) {
+                idx.offset = *new_offset;
             }
         }
         
@@ -483,8 +513,11 @@ impl FileStore {
             }
         }
 
-        // Reset deleted count
-        self.deleted_count.store(0, std::sync::atomic::Ordering::Relaxed);
+        // Clean up deleted_ids - remove only those we compacted
+        let mut deleted_mut = self.deleted_ids.write().await;
+        for id in deleted_snapshot {
+            deleted_mut.remove(&id);
+        }
 
         // Save Snapshot
         self.queue_snapshot(&indices_mut).await;
@@ -493,9 +526,11 @@ impl FileStore {
 
     /// Automatically trigger compaction if the number of documents exceeds a threshold
     /// or if the ratio of deleted documents is high
+    /// Automatically trigger compaction if the number of documents exceeds a threshold
+    /// or if the ratio of deleted documents is high
     pub async fn auto_compact(&self, threshold: usize) -> Result<()> {
         let len = self.indices.read().await.len();
-        let deleted = self.deleted_count.load(std::sync::atomic::Ordering::Relaxed);
+        let deleted = self.deleted_ids.read().await.len();
         
         // Fix #9: Trigger if deleted > threshold OR significant fragmentation
         let should_compact = deleted > threshold || (len > 100 && deleted > len / 3);
@@ -622,8 +657,8 @@ impl VectorStore for FileStore {
         if let Some(pos) = indices.iter().position(|idx| idx.id == id) {
             indices.remove(pos);
             
-            // Fix #9: Track deletions
-            self.deleted_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Track deletions for blocklist compaction
+            self.deleted_ids.write().await.insert(id.to_string());
 
             // 2. Save Snapshot to reflect deletion
             // Clone indices while holding lock to snapshot safely
