@@ -1,8 +1,6 @@
 # AAGT - AI Agent Framework for Trading
 
-[![Crates.io](https://img.shields.io/crates/v/aagt-core.svg)](https://crates.io/crates/aagt-core)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Build Status](https://github.com/undead-undead/aagt/workflows/CI/badge.svg)](https://github.com/undead-undead/aagt/actions)
+
 
 **AAGT (AI Agent Trade)** is a robust, modular, and secure framework for building autonomous trading agents. 
 
@@ -64,7 +62,7 @@ The project is structured as a Cargo workspace:
 
 ---
 
-## 🛡 Security Review
+## Security Review
 
 Security is a first-class citizen for automated trading in AAGT:
 
@@ -82,7 +80,7 @@ Security is a first-class citizen for automated trading in AAGT:
 
 ---
 
-## 🚀 Deployment (VPS Guide)
+## Deployment (VPS Guide)
 
 Recommended setup for a single-user VPS deployment running multiple agents.
 
@@ -138,7 +136,7 @@ sudo systemctl start aagt
 
 ---
 
-## 🧠 Usage Example
+## Usage Example
 
 ### Creating an Agent
 
@@ -175,13 +173,13 @@ let risk_manager = RiskManager::with_config(config, store);
 
 ---
 
-## ⚠️ Disclaimer
+## Disclaimer
 
 This software is for educational and research purposes. Cryptocurrency trading involves significant risk. The authors are not responsible for financial losses. Always test strategies in simulation mode first.
 
 ---
 
-## ☕ Support
+## Support
 
 If you think the project is good, you can support the developers.  
 https://buymeacoffee.com/undeadundead
