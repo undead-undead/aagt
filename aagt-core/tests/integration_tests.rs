@@ -46,9 +46,9 @@ fn test_agent_config_default() {
 
     let config = AgentConfig::default();
     assert_eq!(config.model, "gpt-4o");
-    assert!(config.system_prompt.is_none());
+    assert_eq!(config.preamble, "You are a helpful AI assistant.");
     assert_eq!(config.max_tokens, Some(4096));
-    assert!(config.temperature.is_none());
+    assert_eq!(config.temperature, Some(0.7));
 }
 
 #[test]

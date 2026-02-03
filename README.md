@@ -22,6 +22,12 @@ AAGT is built to scale. It runs efficiently on a 1GB RAM budget (using file-base
 - **Vector Store Interface**: Plug in **Qdrant** for production or use **JSONL files** for local/low-resource setups.
 - **Explicit Memory**: Agents can write Markdown notes (e.g., `trading_log.md`) to reflect on past decisions.
 
+#### Why JSONL?
+We use **JSONL** (JSON Lines) for file-based storage because it is **append-only** and **streamable**.
+- **Resanble RAM**: Reading a 1GB JSON file requires loading it all into RAM. Reading a 1GB JSONL file uses <1MB RAM.
+- **Crash Safety**: Appending a new line is atomic. If the process crashes, previous data remains uncorrupted.
+
+
 ### 3. Execution Pipelines
 Build complex trading strategies using a structured pipeline approach:
 ```mermaid

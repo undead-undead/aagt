@@ -343,9 +343,11 @@ mod tests {
             timestamp: 1000,
             tags: vec!["preference".to_string()],
             relevance: 1.0,
-        }).await.unwrap();
+        }, None).await.unwrap();
 
-        let entries = memory.retrieve_by_tag("user1", "preference", 10).await;
+
+        let entries = memory.retrieve_by_tag("user1", "preference", None, 10).await;
+
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "User prefers SOL");
     }
@@ -366,7 +368,8 @@ mod tests {
             timestamp: 1000,
             tags: vec!["SOLANA".to_string()],
             relevance: 1.0,
-        }).await.unwrap();
+        }, None).await.unwrap();
+
 
         // 2. Store one with "SOL" tag
         memory.store_entry(MemoryEntry {
@@ -376,10 +379,12 @@ mod tests {
             timestamp: 1001,
             tags: vec!["SOL".to_string()],
             relevance: 1.0,
-        }).await.unwrap();
+        }, None).await.unwrap();
+
 
         // 3. Search for "SOL" (should only return "Just SOL")
-        let entries = memory.retrieve_by_tag("user1", "SOL", 10).await;
+        let entries = memory.retrieve_by_tag("user1", "SOL", None, 10).await;
+
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Just SOL");
     }
