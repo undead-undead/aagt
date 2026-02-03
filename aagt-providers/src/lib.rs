@@ -1,6 +1,8 @@
 //! # AAGT Providers
 //!
-//! LLM provider implementations for the AAGT framework.
+//! LLM Provider implementations for AAGT (AI Agent Trade).
+//!
+//! Includes support for OpenAI, Anthropic, Gemini, etc.
 
 #![warn(missing_docs)]
 

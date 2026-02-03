@@ -2,6 +2,8 @@
 //!
 //! Procedural macros for the AAGT AI Agent framework.
 //!
+//! (Updated for AAGT v0.1.2)
+//!
 //! ## `#[tool]` Macro
 //!
 //! Automatically implements the `Tool` trait for a struct.
