@@ -47,8 +47,10 @@ name = "aagt-providers"
 version = "0.1.2"
 dependencies = [
  "aagt-core",
+ "anyhow",
  "async-trait",
  "bytes",
+ "chrono",
  "futures",
  "reqwest",
  "serde",
@@ -57,6 +59,8 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]

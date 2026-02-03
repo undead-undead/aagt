@@ -10,10 +10,9 @@
 use aagt_core::prelude::*;
 use aagt_core::strategy::{Strategy, Condition, Action, NotifyChannel};
 use aagt_core::pipeline::{Pipeline, Step, Context};
-use std::collections::HashMap;
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
+use chrono::Utc;
 
 // Mock Step for fetching price (in real app, this calls an API)
 struct FetchPriceStep {
@@ -25,14 +24,14 @@ struct FetchPriceStep {
 impl Step for FetchPriceStep {
     fn name(&self) -> &str { "Fetch Price" }
     
-    async fn execute(&self, mut ctx: Context) -> Result<Context> {
+    async fn execute(&self, ctx: &mut Context) -> Result<()> {
         println!("  [Step] Fetching price for {}...", self.token);
         // Inject mock price into context
-        ctx.data.insert(
-            format!("price_{}", self.token), 
+        ctx.set(
+            &format!("price_{}", self.token), 
             serde_json::to_value(self.mock_price)?
         );
-        Ok(ctx)
+        Ok(())
     }
 }
 
@@ -45,13 +44,13 @@ struct EvaluateStrategyStep {
 impl Step for EvaluateStrategyStep {
     fn name(&self) -> &str { "Eval Strategy" }
 
-    async fn execute(&self, ctx: Context) -> Result<Context> {
+    async fn execute(&self, ctx: &mut Context) -> Result<()> {
         println!("  [Step] Evaluating condition: {:?}", self.strategy.condition);
         
         let should_trigger = match &self.strategy.condition {
             Condition::PriceAbove { token, threshold } => {
                 let key = format!("price_{}", token);
-                if let Some(val) = ctx.data.get(&key) {
+                if let Some(val) = ctx.get(&key) {
                     let price = val.as_f64().unwrap_or(0.0);
                     println!("         Current Price: ${} | Threshold: ${}", price, threshold);
                     price > *threshold
@@ -68,7 +67,7 @@ impl Step for EvaluateStrategyStep {
             println!("  ❌ Condition NOT met.");
         }
 
-        Ok(ctx)
+        Ok(())
     }
 }
 
@@ -82,7 +81,9 @@ async fn main() -> Result<()> {
         id: "strat_1".to_string(),
         user_id: "user_1".to_string(),
         name: "Buy SOL Breakout".to_string(),
+        description: Some("Demo strategy".to_string()),
         active: true,
+        created_at: Utc::now().timestamp(),
         condition: Condition::PriceAbove {
             token: "SOL".to_string(),
             threshold: 200.0,
@@ -92,16 +93,12 @@ async fn main() -> Result<()> {
                 from_token: "USDC".to_string(),
                 to_token: "SOL".to_string(),
                 amount: "100".to_string(),
-                slippage_percent: 1.0,
             },
             Action::Notify {
                 channel: NotifyChannel::Telegram,
                 message: "SOL breakout! Buying $100.".to_string(),
             }
         ],
-        last_triggered: 0,
-        cooldown_seconds: 3600,
-        metadata: HashMap::new(),
     };
 
     println!("📋 Loaded Strategy: {}", strategy.name);
@@ -109,13 +106,14 @@ async fn main() -> Result<()> {
     // 2. Build Pipeline
     // A pipeline is a sequence of steps.
     // We mix data fetching + logic evaluation.
+    // Note: We pass structs directly, not Boxed, as Pipeline::add_step takes impl Step
     let pipeline = Pipeline::new("Trade Executor")
-        .add_step(Box::new(FetchPriceStep { token: "SOL".to_string(), mock_price: 205.50 }))
-        .add_step(Box::new(EvaluateStrategyStep { strategy }));
+        .add_step(FetchPriceStep { token: "SOL".to_string(), mock_price: 205.50 })
+        .add_step(EvaluateStrategyStep { strategy });
 
     // 3. Execute
     println!("\n🚀 Running Pipeline...");
-    pipeline.run().await?;
+    pipeline.run("Start Trigger").await?;
     println!("✨ Pipeline finished.");
 
     Ok(())

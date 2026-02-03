@@ -32,9 +32,9 @@ async fn main() -> Result<()> {
     }
 
     let config = FileStoreConfig::new(path);
-    let store = FileStore::new(config).await?;
+    let store = FileStore::new(config.clone()).await?;
 
-    println!("📂 FileStore initialized at {:?}", store.config.path);
+    println!("📂 FileStore initialized at {:?}", config.path);
 
     // 2. Store some documents
     // In a real app, you would generate embeddings using an embedding provider (e.g. OpenAI)

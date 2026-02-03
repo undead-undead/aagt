@@ -217,7 +217,9 @@ impl RiskActor {
     async fn handle_check_and_reserve(&mut self, context: TradeContext, checks: &[Arc<dyn RiskCheck>]) -> Result<()> {
          // 0. Multi-process reload check (Simple version: always reload or check timestamp)
          // For now, let's just reload to be 100% safe in multi-process scenarios
-         let _ = self.handle_load().await;
+         // 0. Multi-process reload check REMOVED for performance and InMemory correctness.
+         // If you need multi-process sync, use a database or implement a file watcher.
+         // let _ = self.handle_load().await;
 
          // 1. Stateless Checks
         if context.amount_usd > self.config.max_single_trade_usd {

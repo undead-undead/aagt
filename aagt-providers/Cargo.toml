@@ -29,4 +29,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+anyhow.workspace = true
+chrono.workspace = true
 tokio-test = "0.4"
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true

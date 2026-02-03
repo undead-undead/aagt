@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
             println!("✅ Trade Approved");
             // In a real app, you would execute the swap here.
             // After success/failure, you MUST commit or rollback.
-            manager.commit(&trade_a).await?;
+            manager.commit_trade(&trade_a.user_id, trade_a.amount_usd).await?;
             println!("📝 Trade Committed (Usage Updated)");
         },
         Err(e) => println!("❌ Trade Rejected: {}", e),
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
         };
 
         if manager.check_and_reserve(&trade).await.is_ok() {
-            manager.commit(&trade).await?;
+            manager.commit_trade(&trade.user_id, trade.amount_usd).await?;
             println!("  [Trade {}] Accepted ($800)", i);
         } else {
             println!("  [Trade {}] REJECTED (Daily Limit Reached)", i);
