@@ -4,23 +4,23 @@ use aagt_core::memory::{ShortTermMemory, Memory};
 #[tokio::main]
 async fn main() -> Result<()> {
     // 1. Setup Memory
-    let memory = ShortTermMemory::new(10);
+    let memory = ShortTermMemory::new(10, 100);
     let user_id = "user_verify_isolation";
 
     println!("--- Verifying Memory Isolation ---");
 
     // 2. Agent A stores a message
     println!("> Agent A storing message...");
-    memory.store(user_id, Some("AgentA"), Message::user("Secret for Agent A"));
+    memory.store(user_id, Some("AgentA"), Message::user("Secret for Agent A")).await.unwrap();
 
     // 3. Agent B stores a message
     println!("> Agent B storing message...");
-    memory.store(user_id, Some("AgentB"), Message::user("Secret for Agent B"));
+    memory.store(user_id, Some("AgentB"), Message::user("Secret for Agent B")).await.unwrap();
 
     // 4. Verify Retrieval
     
     // Agent A should ONLY see "Secret for Agent A"
-    let history_a = memory.retrieve(user_id, Some("AgentA"), 10);
+    let history_a = memory.retrieve(user_id, Some("AgentA"), 10).await;
     if history_a.len() == 1 && history_a[0].text() == "Secret for Agent A" {
         println!("✅ Agent A isolation confirmed.");
     } else {
@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
     }
 
     // Agent B should ONLY see "Secret for Agent B"
-    let history_b = memory.retrieve(user_id, Some("AgentB"), 10);
+    let history_b = memory.retrieve(user_id, Some("AgentB"), 10).await;
     if history_b.len() == 1 && history_b[0].text() == "Secret for Agent B" {
         println!("✅ Agent B isolation confirmed.");
     } else {
@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     }
     
     // Global context (None) - should be empty or distinct (depending on design choice, I chose distinct)
-    let history_global = memory.retrieve(user_id, None, 10);
+    let history_global = memory.retrieve(user_id, None, 10).await;
     if history_global.is_empty() {
         println!("✅ Global context isolation confirmed (empty).");
     } else {

@@ -18,6 +18,7 @@
 pub mod agent;
 pub mod error;
 pub mod logging;
+pub mod maintenance;
 pub mod memory;
 pub mod message;
 pub mod multi_agent;
@@ -37,13 +38,16 @@ pub mod tool;
 pub mod prelude {
     pub use crate::agent::{Agent, AgentBuilder, AgentConfig};
     pub use crate::error::{Error, Result};
+    pub use crate::maintenance::{MaintenanceConfig, MaintenanceManager};
     pub use crate::memory::{LongTermMemory, Memory, MemoryManager, ShortTermMemory};
     pub use crate::message::{Content, Message, Role, ToolCall};
     pub use crate::multi_agent::{AgentRole, Coordinator, MultiAgent};
     pub use crate::provider::Provider;
-    pub use crate::risk::{RiskConfig, RiskManager, TradeContext};
+    pub use crate::risk::{
+        RiskCheck, RiskCheckBuilder, RiskCheckResult, RiskConfig, RiskManager, TradeContext,
+    };
     pub use crate::simulation::{SimulationRequest, SimulationResult, Simulator};
-    pub use crate::skill::{DynamicSkill, SkillLoader, SkillMetadata};
+    pub use crate::skill::{DynamicSkill, SkillExecutionConfig, SkillLoader, SkillMetadata};
     pub use crate::strategy::{Action, Condition, Pipeline, Strategy};
     pub use crate::streaming::{StreamingChoice, StreamingResponse};
     pub use crate::tool::{Tool, ToolDefinition, ToolSet};

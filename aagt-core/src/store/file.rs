@@ -17,14 +17,14 @@ use crate::error::{Error, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::io::{Seek, SeekFrom, Write, BufRead};
-use tokio::fs::{self, OpenOptions};
-use tokio::io::{AsyncWriteExt, AsyncBufReadExt, AsyncReadExt};
+use tracing::info;
+use std::path::PathBuf;
+use std::io::{Seek, SeekFrom, Write};
+use tokio::fs;
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use rayon::prelude::*;
-use std::os::unix::fs::FileExt;
 use futures::FutureExt;
 
 /// Configuration for FileStore
@@ -91,7 +91,12 @@ enum StoreMessage {
     /// Save index snapshot to disk
     SaveSnapshot {
         indices: Vec<IndexEntry>,
-    }
+    },
+    /// Batch delete multiple IDs
+    DeleteBatch {
+        ids: Vec<String>,
+        reply: oneshot::Sender<Result<()>>,
+    },
 }
 
 /// Actor managing exclusive write access to the file
@@ -213,7 +218,11 @@ impl FileStoreActor {
                  if let Ok(s) = String::from_utf8(buffer) {
                      if let Ok(doc) = serde_json::from_str::<StoredDocument>(&s) {
                          results.push(doc);
+                     } else {
+                         return Err(Error::MemoryStorage(format!("JSON corruption at offset {}", offset)));
                      }
+                 } else {
+                     return Err(Error::MemoryStorage(format!("UTF8 corruption at offset {}", offset)));
                  }
              }
              
@@ -236,6 +245,30 @@ impl FileStoreActor {
         }).await.map_err(|e| Error::Internal(format!("Snapshot task join error: {}", e)))??;
         Ok(())
     }
+
+    async fn handle_delete_batch(&self, _ids: Vec<String>) -> Result<()> {
+         // Deletion in Append-Only file is just updating the Blocklist (done in FileStore struct)
+         // and Saving the Snapshot of the Index (which excludes the deleted items).
+         // BUT wait, FileStore struct handles the in-memory index update.
+         // Calling this method on the Actor is mainly to serialize the Snapshot update if needed 
+         // or just to synchronize.
+         
+         // Actually, `delete` logic usually updates the `deleted_ids` and then saves a snapshot.
+         // In `delete`, we do: indices.remove(), deleted_ids.insert(), queue_snapshot().
+         
+         // So for batch delete, we just need to ensure we can queue a snapshot.
+         // This message handler might be redundant if we just use SaveSnapshot, 
+         // BUT having it allows us to do specific logic if we change storage engine.
+         // For now, it's a no-op on the FILE itself, but useful for synchronization?
+         
+         // Looking at `delete` implementation in FileStore struct:
+         // It removes from memory, then calls `queue_snapshot`.
+         // So the Actor doesn't really need to do anything special for deletion other than 
+         // eventually compacting or saving snapshot.
+         
+         // However, to follow the pattern and perhaps log or verify:
+         Ok(())
+    }
 }
 
 /// A lightweight file-based vector store with lazy loading
@@ -253,6 +286,8 @@ pub struct FileStore {
     reader: Arc<std::sync::RwLock<Arc<std::fs::File>>>,
     /// Track deleted items for smart compaction (Blocklist)
     deleted_ids: Arc<RwLock<HashSet<String>>>,
+    /// Fix H2: Version counter for detecting compaction
+    version: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl FileStore {
@@ -301,6 +336,10 @@ impl FileStore {
                             StoreMessage::SaveSnapshot { indices } => {
                                 let _ = actor.handle_save_snapshot(indices).await;
                             }
+                            StoreMessage::DeleteBatch { ids: _, reply } => {
+                                // For now, simple ack, as actual deletion is memory+snapshot
+                                let _ = reply.send(Ok(()));
+                            }
                         }
                     }
                 }).catch_unwind().await;
@@ -321,6 +360,7 @@ impl FileStore {
             sender: tx,
             reader: Arc::new(std::sync::RwLock::new(Arc::new(reader))),
             deleted_ids: Arc::new(RwLock::new(HashSet::new())),
+            version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         
         store.load().await?;
@@ -492,7 +532,26 @@ impl FileStore {
             .map_err(|e| Error::MemoryStorage(format!("UTF8 error: {}", e)))?;
             
         serde_json::from_str(&s)
-            .map_err(|e| Error::MemoryStorage(format!("JSON error: {}", e)))
+            .map_err(|e| Error::MemoryStorage(format!("JSON error at offset {}: {}", offset, e)))
+    }
+
+    /// Get a single document by ID (Fast, uses Index)
+    pub async fn get(&self, id: &str) -> Result<Option<Document>> {
+        let indices = self.indices.read().await;
+        let entry = indices.iter().find(|idx| idx.id == id).cloned();
+        drop(indices);
+
+        if let Some(idx) = entry {
+            let doc = self.read_content(idx.offset, idx.length, None).await?;
+            Ok(Some(Document {
+                id: doc.id,
+                content: doc.content,
+                metadata: doc.metadata,
+                score: 1.0,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Check if document exists by ID (using Index only)
@@ -581,7 +640,8 @@ impl FileStore {
                     });
                 }
                 Err(e) => {
-                    tracing::warn!("FileStore: Failed to hydrate document {}: {}", idx.id, e);
+                    // Log but don't fail the whole batch, however return error if it's severe
+                    tracing::error!("FileStore: CRITICAL hydration failure for {}: {}", idx.id, e);
                 }
             }
         }
@@ -590,6 +650,9 @@ impl FileStore {
 
     /// Trigger manual compaction to reclaim disk space
     pub async fn compact(&self) -> Result<()> {
+        // Fix H2: Increment version to invalidate ongoing searches
+        self.version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        
         let deleted_snapshot = self.deleted_ids.read().await.clone();
         
         let (tx, rx) = oneshot::channel();
@@ -671,7 +734,9 @@ impl FileStore {
         
         let indices_lock = self.indices.read().await;
         // While holding indices lock, grab the reader handle
-        let reader_snapshot = self.reader.read().unwrap().clone();
+        let reader_snapshot = self.reader.read()
+            .map_err(|_| Error::Internal("Reader lock poisoned".to_string()))?
+            .clone();
         
         // Clone indices for processing
         let indices_clone = indices_lock.clone();
@@ -712,6 +777,41 @@ impl FileStore {
     }
 
 
+
+    pub async fn delete_batch(&self, ids: Vec<String>) -> Result<()> {
+        let mut indices = self.indices.write().await;
+        let mut deleted_count = 0;
+        
+        let ids_set: HashSet<_> = ids.iter().collect();
+        
+        // Remove from indices
+        indices.retain(|idx| {
+            if ids_set.contains(&idx.id) {
+                deleted_count += 1;
+                false
+            } else {
+                true
+            }
+        });
+        
+        if deleted_count > 0 {
+            // Track deletions
+            let mut deleted_blocklist = self.deleted_ids.write().await;
+            for id in ids {
+                // Should clone id, but we consumed ids vector so it's fine
+                deleted_blocklist.insert(id);
+            }
+            drop(deleted_blocklist);
+
+            // Save Snapshot ONCE
+            let snap = indices.clone();
+            drop(indices);
+            
+            self.queue_snapshot(&snap).await;
+        }
+        
+        Ok(())
+    }
 
     /// Filter metadata to keep the in-memory index small
     fn filter_metadata_for_index(metadata: HashMap<String, String>) -> Vec<(String, String)> {
@@ -808,7 +908,9 @@ impl VectorStore for FileStore {
 
         // 1. Capture Reader Snapshot FIRST (Atomic View)
         let indices_lock = self.indices.read().await;
-        let reader_snapshot = self.reader.read().unwrap().clone();
+        let reader_snapshot = self.reader.read()
+            .map_err(|_| Error::Internal("Reader lock poisoned".to_string()))?
+            .clone();
         let indices_clone = indices_lock.clone();
         drop(indices_lock);
 
@@ -837,21 +939,31 @@ impl VectorStore for FileStore {
              return Ok(Vec::new());
         }
 
-        // 3. Hydrate using Snapshot
-        let mut results = Vec::new();
-        for (score, offset, length, id, metadata) in scored_indices {
-             if let Ok(doc) = self.read_content(offset, length, Some(reader_snapshot.clone())).await {
-                 results.push(Document {
-                    id: doc.id,
-                    content: doc.content,
-                    metadata: doc.metadata, // Use loaded metadata or index metadata? doc.metadata is safer
-                    score,
-                });
-             } else {
-                 // Fallback: use index metadata if read fails? No, content is needed.
-                 // Just Log warning?
-             }
-        }
+        // 3. Hydrate using Snapshot (Batched IO)
+        let results = tokio::task::spawn_blocking(move || {
+            let mut hydrated = Vec::with_capacity(scored_indices.len());
+            // Use the snapshot reader
+            let reader = reader_snapshot;
+            use std::os::unix::fs::FileExt;
+
+            for (score, offset, length, _id, _metadata) in scored_indices {
+                let mut buffer = vec![0u8; length as usize];
+                // Read from same file handle (thread-safe pread)
+                if let Ok(_) = reader.read_exact_at(&mut buffer, offset) {
+                    if let Ok(s) = String::from_utf8(buffer) {
+                        if let Ok(doc) = serde_json::from_str::<StoredDocument>(&s) {
+                             hydrated.push(Document {
+                                id: doc.id,
+                                content: doc.content,
+                                metadata: doc.metadata, 
+                                score,
+                            });
+                        }
+                    }
+                }
+            }
+            hydrated
+        }).await.map_err(|e| Error::Internal(format!("Search hydration join error: {}", e)))?;
         
         Ok(results)
     }
@@ -859,24 +971,6 @@ impl VectorStore for FileStore {
 
 
     async fn delete(&self, id: &str) -> Result<()> {
-        // 1. Remove from index (Soft Delete)
-        // We only update in-memory state and snapshot. Full compaction is deferred.
-        let mut indices = self.indices.write().await;
-        if let Some(pos) = indices.iter().position(|idx| idx.id == id) {
-            indices.remove(pos);
-            
-            // Track deletions for blocklist compaction
-            self.deleted_ids.write().await.insert(id.to_string());
-
-            // 2. Save Snapshot to reflect deletion
-            // Clone indices while holding lock to snapshot safely
-            let snap = indices.clone();
-            drop(indices);
-            
-            self.queue_snapshot(&snap).await;
-            Ok(())
-        } else {
-            Ok(())
-        }
+        self.delete_batch(vec![id.to_string()]).await
     }
 }

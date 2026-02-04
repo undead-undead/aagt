@@ -211,7 +211,10 @@ impl LongTermMemory {
             metadata.insert("agent_id".to_string(), aid.to_string());
         }
         metadata.insert("timestamp".to_string(), entry.timestamp.to_string());
-        metadata.insert("tags".to_string(), serde_json::to_string(&entry.tags).unwrap_or_default());
+        // Serialize tags - fail loudly to maintain data integrity
+        let tags_json = serde_json::to_string(&entry.tags)
+            .map_err(|e| crate::error::Error::Internal(format!("Failed to serialize tags: {}", e)))?;
+        metadata.insert("tags".to_string(), tags_json);
         metadata.insert("relevance".to_string(), entry.relevance.to_string());
 
         // We don't strictly enforce max_entries on insert here to avoid high cost of counting/deleting every time.
@@ -230,54 +233,55 @@ impl LongTermMemory {
     }
 
     /// Prune old entries if exceeding limit
-    pub async fn prune(&self, limit: usize, user_id: String, agent_id: Option<String>) {
-        let store = self.store.clone();
+    /// Fix H1: Synchronous execution with proper error handling
+    pub async fn prune(&self, limit: usize, user_id: String, agent_id: Option<String>) -> Result<(), crate::error::Error> {
         let uid = user_id.clone();
         let aid = agent_id.clone();
         
-        tokio::spawn(async move {
-            // Find all IDs for this user/agent
-            let uid_filter = uid.clone();
-            let aid_filter = aid.clone();
+        // Find all IDs for this user/agent
+        let docs = self.store.find_metadata(move |idx| {
+            if idx.get_metadata("user_id") != Some(&uid) { return false; }
+            if let Some(ref target_aid) = aid {
+                if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
+            }
+            true
+        }).await;
+
+        if docs.len() <= limit {
+            return Ok(());
+        }
+
+        // Parse timestamps and sort
+        let mut entries: Vec<(String, i64)> = docs.into_iter().filter_map(|idx| {
+            let ts = idx.get_metadata("timestamp")?.parse::<i64>().ok()?;
+            Some((idx.id, ts))
+        }).collect();
+
+        // Sort: Oldest first (ascending timestamp)
+        entries.sort_by_key(|k| k.1);
+
+        // Determine how many to delete
+        let to_remove = entries.len().saturating_sub(limit);
+        if to_remove > 0 {
+            // Collect IDs to delete
+            let ids_to_delete: Vec<String> = entries.into_iter()
+                .take(to_remove)
+                .map(|(id, _)| id)
+                .collect();
+
+            tracing::info!("Pruning {} old entries for user {} (agent {:?})", 
+                ids_to_delete.len(), user_id, agent_id);
+
+            // Batch Delete (Single Snapshot Save)
+            self.store.delete_batch(ids_to_delete).await?;
             
-            // We need timestamp to sort, so we can't just use find_ids.
-            // We need to fetch metadata at least.
-            // FileStore::find returns Documents which contain metadata.
-            // Optimized: Use find_metadata to avoid hydrating content
-            let docs = store.find_metadata(move |idx| {
-                if idx.get_metadata("user_id") != Some(&uid_filter) { return false; }
-                if let Some(ref target_aid) = aid_filter {
-                    if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
-                }
-                true
-            }).await;
-
-            if docs.len() <= limit {
-                return;
+            // Trigger compaction if we deleted a lot
+            if to_remove > 100 {
+                self.store.auto_compact(limit).await?;
             }
-
-            // Parse timestamps and sort
-            let mut entries: Vec<(String, i64)> = docs.into_iter().filter_map(|idx| {
-                let ts = idx.get_metadata("timestamp")?.parse::<i64>().ok()?;
-                Some((idx.id, ts))
-            }).collect();
-
-            // Sort: Oldest first (ascending timestamp)
-            entries.sort_by_key(|k| k.1);
-
-            // Determine how many to delete
-            let to_remove = entries.len().saturating_sub(limit);
-            if to_remove > 0 {
-                // Delete oldest
-                for (id, _) in entries.into_iter().take(to_remove) {
-                    store.delete(&id).await.ok();
-                }
-                // Trigger compaction if we deleted a lot
-                if to_remove > 100 {
-                     store.auto_compact(limit).await.ok();
-                }
-            }
-        });
+        }
+        
+        Ok(())
     }
 
     /// Retrieve entries by tag with optional agent isolation
@@ -311,33 +315,41 @@ impl LongTermMemory {
         let uid = user_id.to_string();
         let aid = agent_id.map(|s| s.to_string());
         
-        // Find all entries for user (Accesses Index RAM only)
-        let docs = self.store.find(move |idx| {
-            if idx.get_metadata("user_id") != Some(&uid) { return false; }
-            if let Some(ref target_aid) = aid {
-                if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
-            }
-            true
+        // Fix #2: Use find_metadata to avoid O(N) disk IO hydration
+        let matches = self.store.find_metadata(move |idx| {
+            let matches_user = idx.get_metadata("user_id") == Some(&uid);
+            let matches_agent = aid.is_none() || idx.get_metadata("agent_id") == aid.as_deref();
+            matches_user && matches_agent
         }).await;
-        
-        let mut user_entries: Vec<MemoryEntry> = docs.into_iter()
-            .filter_map(|doc| Self::doc_to_entry(doc))
-            .collect();
-            
-        user_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp)); // newest first
 
-        let mut result = Vec::new();
-        let mut current_chars = 0;
-
-        for entry in user_entries {
-            if current_chars + entry.content.len() > char_limit {
-                break;
-            }
-            current_chars += entry.content.len();
-            result.push(entry);
+        if matches.is_empty() {
+            return Vec::new();
         }
 
-        result
+        // Parse timestamps and sort by timestamp descending (newest first)
+        let mut sorted_indices: Vec<(crate::store::file::IndexEntry, i64)> = matches.into_iter().filter_map(|idx| {
+            let ts = idx.get_metadata("timestamp")?.parse::<i64>().ok()?;
+            Some((idx, ts))
+        }).collect();
+        sorted_indices.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut result_entries = Vec::new();
+        let mut current_chars = 0;
+
+        // Hydrate entries one by one until char_limit is reached
+        for (idx, _) in sorted_indices {
+            // We need to hydrate to get the content length
+            if let Some(doc) = self.store.get(&idx.id).await.ok().flatten() {
+                if current_chars + doc.content.len() > char_limit {
+                    break;
+                }
+                if let Some(entry) = Self::doc_to_entry(doc) {
+                    current_chars += entry.content.len();
+                    result_entries.push(entry);
+                }
+            }
+        }
+        result_entries
     }
 
     /// Helper to convert Document to MemoryEntry
@@ -399,7 +411,7 @@ impl Memory for LongTermMemory {
         
         let store = self.store.clone();
         
-        // Find IDs first
+        // Fix #1: Use delete_batch to avoid O(N^2) work (N snapshots for N items)
         let ids_to_delete = store.find_ids(move |idx| {
             if idx.get_metadata("user_id") != Some(&uid) { return false; }
             if let Some(ref target_aid) = aid {
@@ -408,8 +420,9 @@ impl Memory for LongTermMemory {
             true
         }).await;
 
-        for id in ids_to_delete {
-            store.delete(&id).await?;
+        if !ids_to_delete.is_empty() {
+            tracing::info!("Clearing memory for user {}{}: deleting {} entries in batch", user_id, agent_id.map_or("".to_string(), |a| format!(" (agent {})", a)), ids_to_delete.len());
+            store.delete_batch(ids_to_delete).await?;
         }
         Ok(())
     }
@@ -442,16 +455,17 @@ impl MemoryManager {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_short_term_memory() {
+    #[tokio::test]
+    async fn test_short_term_memory() {
         let memory = ShortTermMemory::new(3, 10);
 
-        memory.store("user1", None, Message::user("Hello"));
-        memory.store("user1", None, Message::assistant("Hi there"));
-        memory.store("user1", None, Message::user("How are you?"));
-        memory.store("user1", None, Message::assistant("I'm good!")); // This should evict "Hello"
+        memory.store("user1", None, Message::user("Hello")).await.unwrap();
+        memory.store("user1", None, Message::assistant("Hi there")).await.unwrap();
+        memory.store("user1", None, Message::user("How are you?")).await.unwrap();
+        // This should evict "Hello"
+        memory.store("user1", None, Message::assistant("I'm good!")).await.unwrap(); 
 
-        let messages = memory.retrieve("user1", None, 10);
+        let messages = memory.retrieve("user1", None, 10).await;
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].text(), "Hi there");
     }

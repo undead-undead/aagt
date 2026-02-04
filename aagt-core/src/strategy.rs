@@ -213,161 +213,220 @@ pub trait StrategyStore: Send + Sync {
     async fn delete(&self, id: &str) -> Result<()>;
 }
 
-/// Simple JSON file store for strategies
+/// Simple JSON file store for strategies (Actor-based)
 pub struct FileStrategyStore {
+    sender: tokio::sync::mpsc::Sender<StrategyCommand>,
+}
+
+enum StrategyCommand {
+    Load { reply: tokio::sync::oneshot::Sender<Result<Vec<Strategy>>> },
+    Save { strategy: Strategy, reply: tokio::sync::oneshot::Sender<Result<()>> },
+    Delete { id: String, reply: tokio::sync::oneshot::Sender<Result<()>> },
+}
+
+struct StrategyActor {
     path: std::path::PathBuf,
-    /// Lock to prevent race conditions during read-modify-write cycles
-    lock: tokio::sync::Mutex<()>,
+    receiver: tokio::sync::mpsc::Receiver<StrategyCommand>,
+}
+
+impl StrategyActor {
+    fn read_strategies(&self) -> Result<Vec<Strategy>> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        
+        let content = std::fs::read_to_string(&self.path)
+            .map_err(|e| crate::error::Error::Internal(format!("Read error: {}", e)))?;
+            
+        if content.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        serde_json::from_str(&content)
+            .map_err(|e| crate::error::Error::Internal(format!("Parse error: {}", e)))
+    }
+    
+    fn write_strategies(&self, strategies: &[Strategy]) -> Result<()> {
+        // Ensure parent dir exists
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| crate::error::Error::Internal(format!("Dir creation error: {}", e)))?;
+        }
+        
+        // Atomic write: tmp + rename
+        let tmp_path = self.path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+        
+        {
+            let file = std::fs::File::create(&tmp_path)
+                .map_err(|e| crate::error::Error::Internal(format!("Tmp file creation error: {}", e)))?;
+                
+            serde_json::to_writer_pretty(&file, strategies)
+                .map_err(|e| crate::error::Error::Internal(format!("Serialization error: {}", e)))?;
+                
+            file.sync_all()
+                .map_err(|e| crate::error::Error::Internal(format!("Sync error: {}", e)))?;
+        }
+        
+        std::fs::rename(&tmp_path, &self.path)
+            .map_err(|e| {
+                // Clean up tmp file on failure
+                let _ = std::fs::remove_file(&tmp_path);
+                crate::error::Error::Internal(format!("Rename error: {}", e))
+            })?;
+            
+        Ok(())
+    }
+    
+    fn handle_load(&self) -> Result<Vec<Strategy>> {
+        self.read_strategies()
+    }
+    
+    fn handle_save(&self, strategy: Strategy) -> Result<()> {
+        let mut strategies = self.read_strategies()?;
+        
+        // Update or insert
+        if let Some(pos) = strategies.iter().position(|s| s.id == strategy.id) {
+            strategies[pos] = strategy;
+        } else {
+            strategies.push(strategy);
+        }
+        
+        self.write_strategies(&strategies)
+    }
+    
+    fn handle_delete(&self, id: &str) -> Result<()> {
+        let mut strategies = self.read_strategies()?;
+        
+        if let Some(pos) = strategies.iter().position(|s| s.id == id) {
+            strategies.remove(pos);
+            self.write_strategies(&strategies)?;
+        }
+        
+        Ok(())
+    }
+    
+    async fn run(mut self) {
+        let path = self.path.clone();
+        
+        loop {
+            let rx = &mut self.receiver;
+            
+            match rx.recv().await {
+                Some(cmd) => {
+                    let path = path.clone();
+                    
+                    // Offload blocking I/O to blocking thread
+                    match cmd {
+                        StrategyCommand::Load { reply } => {
+                            let path_clone = path.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                let actor = StrategyActor {
+                                    path: path_clone,
+                                    receiver: tokio::sync::mpsc::channel(1).1, // Dummy receiver
+                                };
+                                actor.handle_load()
+                            }).await;
+                            
+                            let res = match result {
+                                Ok(r) => r,
+                                Err(e) => Err(crate::error::Error::Internal(format!("Task error: {}", e))),
+                            };
+                            
+                            let _ = reply.send(res);
+                        }
+                        StrategyCommand::Save { strategy, reply } => {
+                            let path_clone = path.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                let actor = StrategyActor {
+                                    path: path_clone,
+                                    receiver: tokio::sync::mpsc::channel(1).1,
+                                };
+                                actor.handle_save(strategy)
+                            }).await;
+                            
+                            let res = match result {
+                                Ok(r) => r,
+                                Err(e) => Err(crate::error::Error::Internal(format!("Task error: {}", e))),
+                            };
+                            
+                            let _ = reply.send(res);
+                        }
+                        StrategyCommand::Delete { id, reply } => {
+                            let path_clone = path.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                let actor = StrategyActor {
+                                    path: path_clone,
+                                    receiver: tokio::sync::mpsc::channel(1).1,
+                                };
+                                actor.handle_delete(&id)
+                            }).await;
+                            
+                            let res = match result {
+                                Ok(r) => r,
+                                Err(e) => Err(crate::error::Error::Internal(format!("Task error: {}", e))),
+                            };
+                            
+                            let _ = reply.send(res);
+                        }
+                    }
+                }
+                None => break, // Channel closed
+            }
+        }
+    }
 }
 
 impl FileStrategyStore {
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { 
-            path: path.into(),
-            lock: tokio::sync::Mutex::new(()),
-        }
-    }
-    
-    // Helper to open file with exclusive lock
-    async fn with_lock<F, T>(&self, f: F) -> Result<T> 
-    where F: FnOnce() -> Result<T> + Send + 'static, T: Send + 'static 
-    {
-        let path = self.path.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
         
-        // Blocking I/O for file locking
-        tokio::task::spawn_blocking(move || {
-            // Ensure parent dir exists
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| crate::error::Error::Internal(e.to_string()))?;
-            }
-            
-            // Open (or create) file for locking
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(&path)
-                .map_err(|e| crate::error::Error::Internal(format!("Failed to open strategy file: {}", e)))?;
-                
-            // Exclusive Lock
-            use fs2::FileExt;
-            file.lock_exclusive().map_err(|e| crate::error::Error::Internal(format!("Failed to lock strategy file: {}", e)))?;
-            
-            let res = f();
-            
-            // Unlock happens automatically when file is closed (dropped)
-            file.unlock().ok(); 
-            
-            res
-        }).await.map_err(|e| crate::error::Error::Internal(format!("Task join error: {}", e)))?
+        let actor = StrategyActor {
+            path: path.into(),
+            receiver: rx,
+        };
+        
+        tokio::spawn(actor.run());
+        
+        Self { sender: tx }
     }
 }
 
 #[async_trait::async_trait]
 impl StrategyStore for FileStrategyStore {
     async fn load(&self) -> Result<Vec<Strategy>> {
-        // Load doesn't necessarily need exclusive lock if we are okay with potentially stale data,
-        // but for consistency let's use shared lock or just read. 
-        // For simplicity and avoiding blocking readers, we just read. 
-        // If we want strict consistency, we should use lock_shared.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender.send(StrategyCommand::Load { reply: tx })
+            .await
+            .map_err(|_| crate::error::Error::Internal("Strategy actor closed".to_string()))?;
         
-        if !self.path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = tokio::fs::read_to_string(&self.path).await?;
-        if content.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        let strategies: Vec<Strategy> = serde_json::from_str(&content)
-            .map_err(|e| crate::error::Error::Internal(format!("Failed to parse strategy file: {}", e)))?;
-        Ok(strategies)
+        rx.await
+            .map_err(|_| crate::error::Error::Internal("Strategy actor dropped reply".to_string()))?
     }
-
+    
     async fn save(&self, strategy: &Strategy) -> Result<()> {
-        let path = self.path.clone();
-        let strategy = strategy.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender.send(StrategyCommand::Save { 
+            strategy: strategy.clone(), 
+            reply: tx 
+        })
+            .await
+            .map_err(|_| crate::error::Error::Internal("Strategy actor closed".to_string()))?;
         
-        tokio::task::spawn_blocking(move || {
-             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| crate::error::Error::Internal(e.to_string()))?;
-            }
-            
-            let mut file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(&path)
-                .map_err(|e| crate::error::Error::Internal(format!("Failed to open: {}", e)))?;
-                
-            use fs2::FileExt;
-            file.lock_exclusive().map_err(|e| crate::error::Error::Internal(format!("Failed to lock: {}", e)))?;
-            
-            // Read current content from file handle
-            use std::io::{Read, Seek, SeekFrom, Write};
-            let mut content = String::new();
-            file.read_to_string(&mut content).map_err(|e| crate::error::Error::Internal(format!("Read failed: {}", e)))?;
-            
-            let mut strategies: Vec<Strategy> = if content.trim().is_empty() {
-                Vec::new()
-            } else {
-                serde_json::from_str(&content).unwrap_or_else(|_| Vec::new())
-            };
-            
-            // Update
-            if let Some(pos) = strategies.iter().position(|s| s.id == strategy.id) {
-                strategies[pos] = strategy;
-            } else {
-                strategies.push(strategy);
-            }
-            
-            // Write back (Truncate/Seek Start)
-            file.seek(SeekFrom::Start(0)).map_err(|e| crate::error::Error::Internal(format!("Seek failed: {}", e)))?;
-            file.set_len(0).map_err(|e| crate::error::Error::Internal(format!("Truncate failed: {}", e)))?;
-            
-            serde_json::to_writer_pretty(&file, &strategies)
-                .map_err(|e| crate::error::Error::Internal(format!("Serialization error: {}", e)))?;
-                
-            file.unlock().ok();
-            Ok(())
-        }).await.map_err(|e| crate::error::Error::Internal(format!("Join error: {}", e)))?
+        rx.await
+            .map_err(|_| crate::error::Error::Internal("Strategy actor dropped reply".to_string()))?
     }
-
+    
     async fn delete(&self, id: &str) -> Result<()> {
-        let path = self.path.clone();
-        let id = id.to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender.send(StrategyCommand::Delete { 
+            id: id.to_string(), 
+            reply: tx 
+        })
+            .await
+            .map_err(|_| crate::error::Error::Internal("Strategy actor closed".to_string()))?;
         
-        tokio::task::spawn_blocking(move || {
-            if !path.exists() { return Ok(()); }
-            
-            let mut file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .map_err(|e| crate::error::Error::Internal(format!("Failed to open: {}", e)))?;
-                
-            use fs2::FileExt;
-            file.lock_exclusive().map_err(|e| crate::error::Error::Internal(format!("Failed to lock: {}", e)))?;
-            
-            let mut content = String::new();
-            use std::io::{Read, Seek, SeekFrom};
-            file.read_to_string(&mut content).map_err(|e| crate::error::Error::Internal(format!("Read failed: {}", e)))?;
-            
-            if !content.trim().is_empty() {
-                let mut strategies: Vec<Strategy> = serde_json::from_str(&content).unwrap_or_default();
-                if let Some(pos) = strategies.iter().position(|s| s.id == id) {
-                    strategies.remove(pos);
-                    
-                    file.seek(SeekFrom::Start(0)).map_err(|e| crate::error::Error::Internal(format!("Seek failed: {}", e)))?;
-                    file.set_len(0).map_err(|e| crate::error::Error::Internal(format!("Truncate failed: {}", e)))?;
-                    
-                    serde_json::to_writer_pretty(&file, &strategies)
-                       .map_err(|e| crate::error::Error::Internal(format!("Serialization error: {}", e)))?;
-                }
-            }
-            
-            file.unlock().ok();
-            Ok(())
-        }).await.map_err(|e| crate::error::Error::Internal(format!("Join error: {}", e)))?
+        rx.await
+            .map_err(|_| crate::error::Error::Internal("Strategy actor dropped reply".to_string()))?
     }
 }
 

@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
 
     // 2. Initialize Risk Manager with InMemory store (use FileRiskStore for persistence)
     let store = Arc::new(InMemoryRiskStore);
-    let manager = RiskManager::with_config(config, store);
+    let manager = RiskManager::with_config(config, store).await.unwrap();
 
     // 3. Simulate Trades
 

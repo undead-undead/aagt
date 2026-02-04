@@ -51,27 +51,27 @@ fn test_agent_config_default() {
     assert_eq!(config.temperature, Some(0.7));
 }
 
-#[test]
-fn test_memory_short_term() {
+#[tokio::test]
+async fn test_memory_short_term() {
     use aagt_core::memory::{Memory, ShortTermMemory};
 
-    let memory = ShortTermMemory::new(5);
+    let memory = ShortTermMemory::new(5, 100);
     
-    memory.store("user1", None, Message::user("Message 1"));
-    memory.store("user1", None, Message::user("Message 2"));
-    memory.store("user1", None, Message::user("Message 3"));
+    memory.store("user1", None, Message::user("Message 1")).await.unwrap();
+    memory.store("user1", None, Message::user("Message 2")).await.unwrap();
+    memory.store("user1", None, Message::user("Message 3")).await.unwrap();
     
     assert_eq!(memory.message_count("user1", None), 3);
     
     // Test capacity limits
-    memory.store("user1", None, Message::user("Message 4"));
-    memory.store("user1", None, Message::user("Message 5"));
-    memory.store("user1", None, Message::user("Message 6"));
+    memory.store("user1", None, Message::user("Message 4")).await.unwrap();
+    memory.store("user1", None, Message::user("Message 5")).await.unwrap();
+    memory.store("user1", None, Message::user("Message 6")).await.unwrap();
     
     assert_eq!(memory.message_count("user1", None), 5); // Should be capped
     
     // Test retrieve
-    let messages = memory.retrieve("user1", None, 3);
+    let messages = memory.retrieve("user1", None, 3).await;
     assert_eq!(messages.len(), 3);
 }
 
@@ -123,7 +123,7 @@ async fn test_risk_manager_basic_checks() {
         trade_cooldown_secs: 5,
     };
 
-    let manager = RiskManager::with_config(config, Arc::new(InMemoryRiskStore));
+    let manager = RiskManager::with_config(config, Arc::new(InMemoryRiskStore)).await.unwrap();
 
     // Test a valid trade
     let valid_trade = TradeContext {
@@ -248,9 +248,9 @@ async fn test_memory_manager() {
     let manager = MemoryManager::new().await.unwrap();
     
     // Store a message
-    manager.short_term.store("user1", None, Message::user("Hello"));
+    manager.short_term.store("user1", None, Message::user("Hello")).await.unwrap();
     
     // Retrieve
-    let messages = manager.short_term.retrieve("user1", None, 10);
+    let messages = manager.short_term.retrieve("user1", None, 10).await;
     assert_eq!(messages.len(), 1);
 }

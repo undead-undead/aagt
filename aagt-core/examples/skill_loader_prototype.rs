@@ -1,10 +1,8 @@
 use aagt_core::prelude::*;
 use aagt_core::tool::{Tool, ToolDefinition};
-use aagt_core::error::{Error, Result};
+use aagt_core::error::{Result};
 use async_trait::async_trait;
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use serde_json::json;
 
 /// A Skill loaded from a .md file
 pub struct MarkdownSkill {
@@ -46,10 +44,16 @@ impl Tool for MarkdownSkill {
 pub struct SkillLoader;
 
 impl SkillLoader {
-    pub async fn load_from_dir(dir: impl AsRef<Path>) -> Result<Vec<MarkdownSkill>> {
-        let mut skills = Vec::new();
+    pub async fn load_from_dir(_dir: impl AsRef<Path>) -> Result<Vec<MarkdownSkill>> {
+        let skills = Vec::new();
         // Dummy implementation: in reality, use walkdir/tokio::fs to parse .md files
         // and extract YAML frontmatter + markdown content.
         Ok(skills)
     }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    println!("Prototype for Skill Loader - functionality is mocked.");
+    Ok(())
 }

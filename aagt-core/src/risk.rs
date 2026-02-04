@@ -17,6 +17,12 @@ use crate::error::{Error, Result};
 mod circuit_breaker;
 pub use circuit_breaker::DeadManSwitch;
 
+mod checks;
+pub use checks::{
+    CompositeCheck, LiquidityCheck, MaxTradeAmountCheck, 
+    RiskCheckBuilder, SlippageCheck, TokenSecurityCheck,
+};
+
 /// Persistence trait for risk state
 #[async_trait::async_trait]
 pub trait RiskStateStore: Send + Sync {
@@ -178,7 +184,7 @@ pub struct UserState {
     /// Daily volume traded (committed)
     pub daily_volume_usd: f64,
     /// Volume currently reserved by pending trades (not yet committed)
-    #[serde(skip)]
+    // Fix: Remove #[serde(skip)] to ensure reservations persist across restarts
     pub pending_volume_usd: f64,
     /// Last trade timestamp
     pub last_trade: Option<DateTime<Utc>>,
@@ -287,6 +293,17 @@ impl RiskActor {
 
         // Reserve
         state.pending_volume_usd += context.amount_usd;
+        
+        // Fix H3: Immediate persistence for critical state changes
+        // Don't rely solely on periodic saves - persist after reserve
+        if let Err(e) = self.store.save(&self.state).await {
+            // Rollback on persistence failure
+            if let Some(s) = self.state.get_mut(&context.user_id) {
+                s.pending_volume_usd = (s.pending_volume_usd - context.amount_usd).max(0.0);
+            }
+            return Err(e);
+        }
+        
         Ok(())
     }
 
@@ -378,7 +395,9 @@ impl RiskManager {
                     // Actually, if it panics, we might want to reload state from disk
                     // but we have to be careful about pending volume.
                     // For now, just keep the task alive.
+                    // Fix: Track if state was modified during message processing
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                    let mut dirty = false;  // Fix L2: Track if state needs saving
                     
                     loop {
                         tokio::select! {
@@ -388,14 +407,17 @@ impl RiskManager {
                                          match msg {
                                              RiskCommand::CheckAndReserve { context, checks, reply } => {
                                                  let res = actor.handle_check_and_reserve(context, &checks).await;
+                                                 dirty = res.is_ok();  // Mark dirty if reservation succeeded
                                                  let _ = reply.send(res);
                                              }
                                              RiskCommand::Commit { user_id, amount_usd, reply } => {
                                                  let res = actor.handle_commit(user_id, amount_usd).await;
+                                                 // Commit already saves, no need to set dirty
                                                  let _ = reply.send(res);
                                              }
                                              RiskCommand::Rollback { user_id, amount_usd } => {
                                                  actor.handle_rollback(user_id, amount_usd);
+                                                 dirty = true;
                                              }
                                              RiskCommand::GetRemaining { user_id, reply } => {
                                                  let val = actor.handle_get_remaining(user_id);
@@ -411,10 +433,14 @@ impl RiskManager {
                                 }
                             }
                             _ = interval.tick() => {
-                                // Periodic Flush
-                                tracing::debug!("RiskManager: performing periodic state flush");
-                                if let Err(e) = actor.store.save(&actor.state).await {
-                                     tracing::error!("Periodic risk persistence failed: {}", e);
+                                // Fix L2: Only save if state was modified
+                                if dirty {
+                                    tracing::debug!("RiskManager: performing periodic state flush");
+                                    if let Err(e) = actor.store.save(&actor.state).await {
+                                         tracing::error!("Periodic risk persistence failed: {}", e);
+                                    } else {
+                                        dirty = false;
+                                    }
                                 }
                             }
                         }
@@ -467,7 +493,9 @@ impl RiskManager {
 
     /// Perform all risk checks for a trade AND reserve the volume.
     pub async fn check_and_reserve(&self, context: &TradeContext) -> Result<()> {
-        let checks = self.custom_checks.read().unwrap().clone();
+        let checks = self.custom_checks.read()
+            .map_err(|_| Error::Internal("Risk check lock poisoned".to_string()))?
+            .clone();
         
         let (tx, rx) = oneshot::channel();
         self.sender.send(RiskCommand::CheckAndReserve { 

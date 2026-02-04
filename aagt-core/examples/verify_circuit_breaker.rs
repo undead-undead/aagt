@@ -11,7 +11,7 @@ async fn main() -> Result<()> {
         std::fs::remove_file(&stop_file)?;
     }
     
-    let manager = RiskManager::new();
+    let manager = RiskManager::new().await.unwrap();
     let switch = DeadManSwitch::new(stop_file.clone());
     manager.add_check(Arc::new(switch));
     

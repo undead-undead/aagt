@@ -113,7 +113,10 @@ impl<P: Provider> Agent<P> {
 
     /// Helper to emit events safely
     fn emit(&self, event: AgentEvent) {
-        let _ = self.events.send(event);
+        if let Err(e) = self.events.send(event) {
+            // Log warning if no receivers (not critical, but good to know)
+            tracing::debug!("Failed to emit event (no receivers): {}", e);
+        }
     }
 
     /// Send a prompt and get a response (non-streaming)
@@ -208,20 +211,58 @@ impl<P: Provider> Agent<P> {
             });
 
             // 2. Execute Tools (Parallel)
-            // Use futures::future::join_all for concurrency
+            // Fix C1: Avoid moving self in async closures
+            let tools = &self.tools;
+            let policy = &self.config.tool_policy;
+            let events = &self.events;
+            
             let mut futures = Vec::new();
             
             for (id, name, args) in tool_calls {
+                let name_clone = name.clone();
+                let id_clone = id.clone();
+                let args_str = args.to_string();
+                
                 futures.push(async move {
-                    let args_str = args.to_string();
-                    let result = self.call_tool(&name, &args_str).await; 
+                    // Check policy
+                    let effective_policy = policy.overrides.get(&name_clone)
+                        .unwrap_or(&policy.default_policy);
+                    
+                    let result = match effective_policy {
+                        ToolPolicy::Disabled => {
+                            Err(Error::tool_execution(name_clone.clone(), "Tool execution is disabled by policy".to_string()))
+                        }
+                        ToolPolicy::RequiresApproval => {
+                            let _ = events.send(AgentEvent::ApprovalPending { 
+                                tool: name_clone.clone(), 
+                                input: args_str.clone() 
+                            });
+                            Err(Error::ToolApprovalRequired { tool_name: name_clone.clone() })
+                        }
+                        ToolPolicy::Auto => {
+                            let _ = events.send(AgentEvent::ToolCall { 
+                                tool: name_clone.clone(), 
+                                input: args_str.clone() 
+                            });
+                            tools.call(&name_clone, &args_str).await
+                        }
+                    };
                     
                     let output = match result {
-                        Ok(s) => s,
-                        Err(e) => format!("Error: {}", e),
+                        Ok(s) => {
+                            let _ = events.send(AgentEvent::ToolResult { 
+                                tool: name_clone.clone(), 
+                                output: s.clone() 
+                            });
+                            s
+                        }
+                        Err(e) => {
+                            let _ = events.send(AgentEvent::Error { message: e.to_string() });
+                            format!("Error: {}", e)
+                        }
                     };
 
-                    (id, output, name)
+                    (id_clone, output, name_clone)
                 });
             }
             
@@ -411,7 +452,8 @@ impl<P: Provider> AgentBuilder<P> {
             return Err(Error::agent_config("model name cannot be empty"));
         }
 
-        let (tx, _) = broadcast::channel(100);
+        // Fix M4: Increase event channel capacity to avoid message loss in high-frequency scenarios
+        let (tx, _) = broadcast::channel(1000);
 
         Ok(Agent {
             provider: Arc::new(self.provider),

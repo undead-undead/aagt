@@ -35,12 +35,37 @@ pub struct SkillMetadata {
     pub runtime: Option<String>,
 }
 
+/// Configuration for skill execution
+#[derive(Debug, Clone)]
+pub struct SkillExecutionConfig {
+    /// Maximum execution time in seconds
+    pub timeout_secs: u64,
+    /// Maximum output size in bytes (to prevent memory exhaustion)
+    pub max_output_bytes: usize,
+    /// Whether to allow network access (future: implement via sandbox)
+    pub allow_network: bool,
+    /// Custom environment variables
+    pub env_vars: HashMap<String, String>,
+}
+
+impl Default for SkillExecutionConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 30,
+            max_output_bytes: 1024 * 1024, // 1MB
+            allow_network: false,
+            env_vars: HashMap::new(),
+        }
+    }
+}
+
 /// A skill that executes an external script
 pub struct DynamicSkill {
     metadata: SkillMetadata,
     instructions: String,
     base_dir: PathBuf,
     risk_manager: Option<Arc<RiskManager>>,
+    execution_config: SkillExecutionConfig,
 }
 
 impl DynamicSkill {
@@ -51,12 +76,19 @@ impl DynamicSkill {
             instructions,
             base_dir,
             risk_manager: None,
+            execution_config: SkillExecutionConfig::default(),
         }
     }
 
     /// Set a risk manager for validating proposals
     pub fn with_risk_manager(mut self, risk_manager: Arc<RiskManager>) -> Self {
         self.risk_manager = Some(risk_manager);
+        self
+    }
+
+    /// Set custom execution configuration
+    pub fn with_execution_config(mut self, config: SkillExecutionConfig) -> Self {
+        self.execution_config = config;
         self
     }
 }
@@ -91,8 +123,6 @@ impl Tool for DynamicSkill {
             Error::tool_execution(self.name(), "No script defined for this skill".to_string())
         })?;
 
-        let runtime = self.metadata.runtime.as_deref().unwrap_or("python3");
-        let script_file = self.metadata.script.as_ref().unwrap();
         let script_rel_path = Path::new("scripts").join(script_file);
         let script_full_path = self.base_dir.join(&script_rel_path);
 
@@ -103,20 +133,73 @@ impl Tool for DynamicSkill {
             ));
         }
 
+        let runtime = self.metadata.runtime.as_deref().unwrap_or("python3");
         info!("Executing dynamic skill {} using {}", self.name(), runtime);
 
-        let output = tokio::process::Command::new(runtime)
-            .arg(&script_rel_path) // Relative to current_dir
+        // Use configured timeout
+        let timeout_duration = std::time::Duration::from_secs(self.execution_config.timeout_secs);
+        
+        let mut cmd = tokio::process::Command::new(runtime);
+        cmd.arg(&script_rel_path)
             .arg(arguments)
             .current_dir(&self.base_dir)
-            .output()
-            .await
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        // Apply environment variables from config
+        for (key, value) in &self.execution_config.env_vars {
+            cmd.env(key, value);
+        }
+
+        // Restrict network access if configured (Linux-only via basic example)
+        if !self.execution_config.allow_network {
+            // Note: True sandboxing requires container/VM. This is a placeholder.
+            // In production, consider using firejail, nsjail, or containers.
+            cmd.env("NO_PROXY", "*");
+        }
+
+        let mut child = cmd.spawn()
             .map_err(|e| Error::tool_execution(self.name(), format!("Failed to spawn process: {}", e)))?;
+
+        // Save process ID before moving child
+        let pid = child.id();
+        
+        let output_future = child.wait_with_output();
+        let output = match tokio::time::timeout(timeout_duration, output_future).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return Err(Error::tool_execution(self.name(), format!("Process failed: {}", e)));
+            }
+            Err(_) => {
+                // Timeout: forcefully kill the process using saved PID
+                warn!("Skill {} timed out after {}s, killing process {}", self.name(), timeout_duration.as_secs(), pid.unwrap_or(0));
+                if let Some(pid) = pid {
+                    // Use system kill command
+                    #[cfg(unix)]
+                    {
+                        use std::process::Command;
+                        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+                    }
+                }
+                return Err(Error::tool_execution(
+                    self.name(), 
+                    format!("Skill timed out after {}s", timeout_duration.as_secs())
+                ));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!("Skill {} script failed: {}", self.name(), stderr);
             return Err(Error::tool_execution(self.name(), stderr.to_string()));
+        }
+
+        // Check output size limit
+        if output.stdout.len() > self.execution_config.max_output_bytes {
+            return Err(Error::tool_execution(
+                self.name(),
+                format!("Script output exceeds size limit of {} bytes", self.execution_config.max_output_bytes)
+            ));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -210,7 +293,7 @@ impl SkillLoader {
         Ok(())
     }
 
-    async fn load_skill(&self, path: &Path) -> Result<DynamicSkill> {
+    pub async fn load_skill(&self, path: &Path) -> Result<DynamicSkill> {
         let manifest_path = path.join("SKILL.md");
         if !manifest_path.exists() {
             return Err(Error::Internal("No SKILL.md found".to_string()));

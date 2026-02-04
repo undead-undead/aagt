@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("--- 1. Testing Actor Self-Healing (Supervision) ---");
-    let risk_manager = RiskManager::new();
+    let risk_manager = RiskManager::new().await.unwrap();
     
     // Test basic check
     let ctx = TradeContext {
@@ -75,8 +75,8 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
     
-    let manager1 = RiskManager::with_config(config.clone(), store.clone());
-    let manager2 = RiskManager::with_config(config.clone(), store.clone());
+    let manager1 = RiskManager::with_config(config.clone(), store.clone()).await.unwrap();
+    let manager2 = RiskManager::with_config(config.clone(), store.clone()).await.unwrap();
 
     let ctx1 = TradeContext {
         user_id: "shared_user".to_string(),
