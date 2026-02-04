@@ -566,11 +566,4 @@ If you find AAGT useful, consider supporting the developers:
 
 ---
 
-## Links
-
-- **Documentation**: See project docs in repository
-- **Issues**: https://github.com/undead-undead/aagt/issues
-
----
-
 **Built with Rust | Production-Ready v0.3.0**
