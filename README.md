@@ -55,23 +55,24 @@ ShortTermMemory: DashMap-based, O(1) access
 LongTermMemory: FileStore (JSONL) or Qdrant (vectors)
 ```
 
-- **Append-Only**: Atomic writes, crash-safe.
-- **Streamable**: Read line-by-line, minimal RAM.
-- **Human-Readable**: Easy debugging and data recovery.
+### Persistence & Isolation Mechanisms
 
-### Persistence Mechanisms
+AAGT ensures data safety and multi-tenant security through differentiated persistence and isolation strategies:
 
-AAGT ensures data safety through differentiated persistence strategies:
-
-**1. Short-Term Memory (State Snapshot)**
-- **Method**: Atomic JSON Snapshot.
-- **Trigger**: Every message write (`store`) or `clear` operation triggers an asynchronous flush to disk (e.g., `memory.json`).
+**1. Short-Term Memory (Context Isolation)**
+- **Persistence**: Atomic JSON Snapshot.
+- **Trigger**: Every write (`store`) or `clear` operation triggers an asynchronous flush to disk.
+- **Isolation**: 
+  - **Logical**: Uses composite keys (`user_id:agent_id`) to maintain strict separation of conversation state in memory.
+  - **Physical**: Supports independent persistence paths per instance, allowing isolated storage for different users or agents.
 - **Optimization**: Uses non-blocking bucket locking to ensure memory operations aren't stalled by Disk I/O.
 
-**2. Long-Term Memory (Append-Only Log)**
-- **Method**: JSONL (JSON Lines).
-- **Trigger**: New entries are appended to the end of the file instantly.
-- **Maintenance**: Uses background **compaction** (Garbage Collection) to clean up deleted entries and stale data without locking the main execution thread.
+**2. Long-Term Memory (Knowledge Isolation)**
+- **Persistence**: JSONL (JSON Lines) - Append-Only Log.
+- **Trigger**: Incremental appends ensure data is persisted immediately without rewriting the whole file.
+- **Isolation**: 
+  - **Structured Isolation**: Every `MemoryEntry` is bound to a `user_id`. The retrieval engine enforces mandatory filtering, ensuring agents never "see" or "hallucinate" using data from other users.
+- **Maintenance**: Background **compaction** (GC) cleans up deleted entries without locking the execution thread.
 
 ### Memory System Detail
 
