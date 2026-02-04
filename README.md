@@ -55,10 +55,23 @@ ShortTermMemory: DashMap-based, O(1) access
 LongTermMemory: FileStore (JSONL) or Qdrant (vectors)
 ```
 
-**Why JSONL?**
-- **Append-Only**: Atomic writes, crash-safe
-- **Streamable**: Read line-by-line, minimal RAM
-- **Human-Readable**: Easy debugging and data recovery
+- **Append-Only**: Atomic writes, crash-safe.
+- **Streamable**: Read line-by-line, minimal RAM.
+- **Human-Readable**: Easy debugging and data recovery.
+
+### Persistence Mechanisms
+
+AAGT ensures data safety through differentiated persistence strategies:
+
+**1. Short-Term Memory (State Snapshot)**
+- **Method**: Atomic JSON Snapshot.
+- **Trigger**: Every message write (`store`) or `clear` operation triggers an asynchronous flush to disk (e.g., `memory.json`).
+- **Optimization**: Uses non-blocking bucket locking to ensure memory operations aren't stalled by Disk I/O.
+
+**2. Long-Term Memory (Append-Only Log)**
+- **Method**: JSONL (JSON Lines).
+- **Trigger**: New entries are appended to the end of the file instantly.
+- **Maintenance**: Uses background **compaction** (Garbage Collection) to clean up deleted entries and stale data without locking the main execution thread.
 
 ### Memory System Detail
 
@@ -115,7 +128,6 @@ StrategyStore    → Actor (atomic file operations)
 
 **Benefits**:
 - No deadlocks: Optimized bucket locking in `ShortTermMemory` ensures safe async persistence.
-- No race conditions: Multi-process safe file locking and reader snapshots for searches.
 - 40-50% performance improvement.
 
 ### 5. Composable Risk Management
