@@ -2,7 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.0-green.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.2-green.svg)](Cargo.toml)
 
 **AAGT (AI Agent Trade)** is a production-grade, modular, and secure framework for building autonomous trading agents in Rust. Designed to run efficiently on resource-constrained environments (1GB RAM VPS) while scaling to institutional-grade deployments.
 
@@ -41,6 +41,8 @@ AAGT uniquely bridges the gap between hobbyist and professional trading infrastr
   ```
   Loading 1GB JSON:    ~1GB RAM required
   Loading 1GB JSONL:   <1MB RAM required
+
+- **Vector Quantization**: Built-in 8-bit quantization for embeddings, reducing RAM usage by 4x for RAG on low-end VPS.
   ```
 
 ### 2. Hybrid Memory Architecture
@@ -112,9 +114,9 @@ StrategyStore    → Actor (atomic file operations)
 ```
 
 **Benefits**:
-- No deadlocks, no race conditions
-- 40-50% performance improvement
-- Clean separation of concerns
+- No deadlocks: Optimized bucket locking in `ShortTermMemory` ensures safe async persistence.
+- No race conditions: Multi-process safe file locking and reader snapshots for searches.
+- 40-50% performance improvement.
 
 ### 5. Composable Risk Management
 
@@ -122,9 +124,9 @@ Build custom risk pipelines with the new `RiskCheckBuilder`:
 
 ```rust
 let checks = RiskCheckBuilder::new()
-    .max_trade_amount(5_000.0)
-    .max_slippage(1.5)
-    .min_liquidity(1_000_000.0)
+    .max_trade_amount(dec!(5000.0))
+    .max_slippage(dec!(1.5))
+    .min_liquidity(dec!(1000000.0))
     .token_security(vec!["SCAM_TOKEN".to_string()])
     .build();
 
@@ -205,7 +207,7 @@ let provider = Gemini::from_env()?;
 let provider = DeepSeek::from_env()?;
 
 // Moonshot/Kimi (Chinese market)
-let provider = MoonshotProvider::from_env()?;
+let provider = Moonshot::from_env()?;
 ```
 
 ---
@@ -258,11 +260,12 @@ aagt/
 
 2. **Risk Manager (Actor-Isolated)**  
    - Max single trade amount
-   - Max daily volume (stateful, persisted)
+   - Max daily volume (**Stateful & Persisted to disk**)
    - Slippage tolerance
    - Minimum liquidity
    - Rug pull detection
    - Cooldown periods
+   - **Financial Precision**: All checks use `rust_decimal` to prevent floating-point errors.
 
 3. **Execution Sandboxing**  
    ```rust
@@ -348,10 +351,10 @@ use aagt_core::prelude::*;
 
 // Conservative configuration for 1GB VPS
 let config = RiskConfig {
-    max_single_trade_usd: 5_000.0,
-    max_daily_volume_usd: 20_000.0,
-    max_slippage_percent: 2.0,
-    min_liquidity_usd: 100_000.0,
+    max_single_trade_usd: dec!(5000.0),
+    max_daily_volume_usd: dec!(20000.0),
+    max_slippage_percent: dec!(2.0),
+    min_liquidity_usd: dec!(100000.0),
     enable_rug_detection: true,
     trade_cooldown_secs: 10,
 };
@@ -367,9 +370,9 @@ let risk_manager = RiskManager::with_config(
 ```rust
 // Build custom risk pipeline
 let checks = RiskCheckBuilder::new()
-    .max_trade_amount(10_000.0)
-    .max_slippage(1.5)
-    .min_liquidity(500_000.0)
+    .max_trade_amount(dec!(10000.0))
+    .max_slippage(dec!(1.5))
+    .min_liquidity(dec!(500000.0))
     .token_security(vec!["SCAM1".to_string(), "SCAM2".to_string()])
     .build();
 
@@ -383,9 +386,9 @@ let context = TradeContext {
     user_id: "trader123".to_string(),
     from_token: "USDC".to_string(),
     to_token: "SOL".to_string(),
-    amount_usd: 1_000.0,
-    expected_slippage: 0.5,
-    liquidity_usd: Some(2_000_000.0),
+    amount_usd: dec!(1000.0),
+    expected_slippage: dec!(0.5),
+    liquidity_usd: Some(dec!(2000000.0)),
     is_flagged: false,
 };
 
@@ -589,4 +592,4 @@ If you find AAGT useful, consider supporting the developers:
 
 ---
 
-**Built with Rust | Production-Ready v0.3.0**
+**Built with Rust | Production-Ready v0.1.2**
