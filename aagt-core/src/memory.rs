@@ -105,14 +105,18 @@ impl ShortTermMemory {
         }
         
         // Convert DashMap to HashMap for serialization
-        // Note: For 1 user (or 100), this is very cheap. 
         let data: HashMap<_, _> = self.store.iter().map(|r| (r.key().clone(), r.value().clone())).collect();
         
         let json = serde_json::to_string_pretty(&data)
              .map_err(|e| crate::error::Error::Internal(format!("Failed to serialize memory: {}", e)))?;
              
-        tokio::fs::write(&self.path, json).await
-             .map_err(|e| crate::error::Error::Internal(format!("Failed to write memory file: {}", e)))?;
+        // Atomic save: write to tmp then rename
+        let tmp_path = self.path.with_extension("tmp");
+        tokio::fs::write(&tmp_path, json).await
+             .map_err(|e| crate::error::Error::Internal(format!("Failed to write temporary memory file: {}", e)))?;
+             
+        tokio::fs::rename(tmp_path, &self.path).await
+             .map_err(|e| crate::error::Error::Internal(format!("Failed to rename memory file: {}", e)))?;
              
         Ok(())
     }

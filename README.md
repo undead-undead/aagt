@@ -60,16 +60,16 @@ LongTermMemory: FileStore (JSONL) or Qdrant (vectors)
 AAGT ensures data safety and multi-tenant security through differentiated persistence and isolation strategies:
 
 **1. Short-Term Memory (Context Isolation)**
-- **Persistence**: Atomic JSON Snapshot.
-- **Trigger**: Every write (`store`) or `clear` operation triggers an asynchronous flush to disk.
+- **Saving Method**: **Atomic Snapshot (Write-then-Rename)**.
+- **Trigger**: Every write (`store`) or `clear` operation triggers an asynchronous, atomic write to a JSON file. By writing to a `.tmp` file and then renaming it, AAGT ensures context data never becomes corrupted if the process restarts mid-save.
 - **Isolation**: 
   - **Logical**: Uses composite keys (`user_id:agent_id`) to maintain strict separation of conversation state in memory.
   - **Physical**: Supports independent persistence paths per instance, allowing isolated storage for different users or agents.
 - **Optimization**: Uses non-blocking bucket locking to ensure memory operations aren't stalled by Disk I/O.
 
 **2. Long-Term Memory (Knowledge Isolation)**
-- **Persistence**: JSONL (JSON Lines) - Append-Only Log.
-- **Trigger**: Incremental appends ensure data is persisted immediately without rewriting the whole file.
+- **Saving Method**: **Append-Only Log (JSONL)**.
+- **Trigger**: New entries are appended to the end of the file instantly, making it highly efficient for streaming and data durability.
 - **Isolation**: 
   - **Structured Isolation**: Every `MemoryEntry` is bound to a `user_id`. The retrieval engine enforces mandatory filtering, ensuring agents never "see" or "hallucinate" using data from other users.
 - **Maintenance**: Background **compaction** (GC) cleans up deleted entries without locking the execution thread.
