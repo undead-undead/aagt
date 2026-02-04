@@ -72,5 +72,21 @@ async fn main() -> Result<()> {
 
 ---
 
+## ☕ Support the Project
+
+If you find AAGT useful, consider supporting the developers:
+
+**Buy Me a Coffee**: https://buymeacoffee.com/undeadundead
+
+**Crypto Donations**:
+- **Solana**: `9QFKQ3jpBSuNPLZQH1uq5GrJm4RDKue82zeVaXwazcmj`
+- **Base**: `0x4cf0b79aea1c229dfb1df9e2b40ea5dd04f37969`
+
+---
+
 ## ⚖️ License
 MIT / Apache 2.0
+
+---
+
+**Built with Rust | Production-Ready v0.1.2**
