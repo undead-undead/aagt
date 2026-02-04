@@ -27,6 +27,7 @@ pub mod provider;
 pub mod rag;
 pub mod risk;
 pub mod simulation;
+pub mod skill;
 pub mod store;
 pub mod strategy;
 pub mod streaming;
@@ -42,6 +43,7 @@ pub mod prelude {
     pub use crate::provider::Provider;
     pub use crate::risk::{RiskConfig, RiskManager, TradeContext};
     pub use crate::simulation::{SimulationRequest, SimulationResult, Simulator};
+    pub use crate::skill::{DynamicSkill, SkillLoader, SkillMetadata};
     pub use crate::strategy::{Action, Condition, Pipeline, Strategy};
     pub use crate::streaming::{StreamingChoice, StreamingResponse};
     pub use crate::tool::{Tool, ToolDefinition, ToolSet};

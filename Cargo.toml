@@ -58,6 +58,7 @@ syn = { version = "2.0", features = ["full", "parsing"] }
 
 # Serialization
 bincode = "1.3"
+serde_yaml_ng = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

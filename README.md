@@ -35,7 +35,12 @@ graph LR
 - **Lazy Execution**: Steps only run when needed (saving tokens and API costs).
 - **Hybrid Logic**: Mix LLM intelligence with hard-coded Rust logic (e.g., rigid risk controls).
 
-### 4. Built-in Notifications
+### 4. Dynamic Skill Module (Scheme B)
+- **Plugin Architecture**: Load new capabilities at runtime using `.md` manifests and external scripts (Python, Rust, etc.).
+- **Hot-Reloading**: Add or modify skills in the `skills/` directory without restarting the core process.
+- **Safety routing**: All transactional outputs from dynamic scripts are intercepted as "proposals" and routed through the `RiskManager`.
+
+### 5. Built-in Notifications
 Zero-cost integration with your favorite platforms:
 - **Telegram** (Bot API)
 - **Discord** (Webhooks)
@@ -48,19 +53,20 @@ Zero-cost integration with your favorite platforms:
 The project is structured as a Cargo workspace:
 
 - **`aagt-core`**: The heart of the framework.
-    - **Agent System**: `Agent` and `MultiAgent` abstractions for single or coordinated agent workflows.
-    - **Risk Management**: `RiskManager` using the Actor model to ensure thread-safe, durable state management.
-    - **Pipeline Engine**: `StrategyEngine` for executing conditional trading logic (Conditions -> Actions).
-    - **Memory**: Short-term (RAM) and Long-term (Vector Store/JSON) memory systems.
-- **`aagt-providers`**: Integrations for LLMs (OpenAI, Gemini, DeepSeek, etc.).
-- **`aagt-macros`**: Procedural macros to simplify tool creation.
+    - **Agent System**: `Agent` and `MultiAgent` abstractions.
+    - **Skill System**: `SkillLoader` and `DynamicSkill` for loading capabilities from Markdown files.
+    - **Risk Management**: Actor-based `RiskManager` for durable, thread-safe protection.
+    - **Memory**: Hybrid Short-term (RAM) and Long-term (JSON/Vector) memory.
+    - **Pipeline Engine**: Conditional trading logic execution.
+- **`aagt-providers`**: LLM backends (OpenAI, Gemini, DeepSeek, Moonshot/Kimi).
+- **`aagt-macros`**: Simplifies kernel-level tool creation.
 
 ### Technical Highlights
-- **Actors**: Components like `RiskManager` use an actor pattern (channels) to manage state without locks, ensuring high concurrency.
-- **Dynamic Strategies**: Strategies are defined as data (JSON), allowing dynamic reloading without recompilation.
-- **Explicit Tools**: Capabilities are explicit and self-describing via `Tool` traits.
-- **Risky Tool Policy**: Built-in "Approval Layer" to prevent dangerous tool execution without permission.
-- **Extensible**: Supports custom providers and complex tools like Semantic Web Browsers (ARIA-based).
+- **"Kernel + Shell" Architecture**: Rust provides the secure, high-performance "Kernel" while `.md` scripts provide the flexible "Shell".
+- **Proposal-Based Execution**: Guarantees that no external script can execute a trade without passing through the Rust-enforced risk limits.
+- **Actors**: Lock-free concurrency for stateful components.
+- **Min RAM**: Optimized for 1GB VPS environments.
+- **Risky Tool Policy**: Configurable approval layers for dangerous operations.
 
 ---
 
