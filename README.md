@@ -8,16 +8,16 @@
 
 ---
 
-## 🌟 **Why AAGT?**
+## Why AAGT?
 
-### **From $5 VPS to Enterprise Clusters**
+### From $5 VPS to Enterprise Clusters
 
 AAGT uniquely bridges the gap between hobbyist and professional trading infrastructure:
 
-- ✅ **Runs on 1GB RAM VPS** using file-based storage (JSONL)
-- ✅ **Scales to Qdrant/PostgreSQL** for high-frequency trading
-- ✅ **Actor-based concurrency** for lock-free multi-agent coordination
-- ✅ **Production-ready security** with built-in risk management
+- **Runs on 1GB RAM VPS** using file-based storage (JSONL)
+- **Scales to Qdrant/PostgreSQL** for high-frequency trading
+- **Actor-based concurrency** for lock-free multi-agent coordination
+- **Production-ready security** with built-in risk management
 
 ```
 ┌────────────────────┬──────────────────┬─────────────────────┐
@@ -31,19 +31,19 @@ AAGT uniquely bridges the gap between hobbyist and professional trading infrastr
 
 ---
 
-## 🚀 **Key Features**
+## Key Features
 
-### **1. Ultra-Lightweight & Resource-Optimized**
+### 1. Ultra-Lightweight & Resource-Optimized
 
 - **Rust Native**: Zero garbage collection, minimal memory footprint
 - **Tokio Async Runtime**: Non-blocking I/O for maximum efficiency
 - **JSONL-Based Storage**: Append-only, crash-safe, streaming reads
   ```
-  Loading 1GB JSON:    ~1GB RAM required  ❌
-  Loading 1GB JSONL:   <1MB RAM required  ✅
+  Loading 1GB JSON:    ~1GB RAM required
+  Loading 1GB JSONL:   <1MB RAM required
   ```
 
-### **2. Hybrid Memory Architecture**
+### 2. Hybrid Memory Architecture
 
 ```rust
 // In-memory for active conversations
@@ -58,7 +58,7 @@ LongTermMemory: FileStore (JSONL) or Qdrant (vectors)
 - **Streamable**: Read line-by-line, minimal RAM
 - **Human-Readable**: Easy debugging and data recovery
 
-### **3. Kernel + Shell Architecture**
+### 3. Kernel + Shell Architecture
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -78,7 +78,7 @@ LongTermMemory: FileStore (JSONL) or Qdrant (vectors)
 
 **Proposal-Based Safety**: External scripts can't execute trades directly—they submit proposals that must pass RiskManager approval.
 
-### **4. Actor Model Concurrency** (v0.3.0)
+### 4. Actor Model Concurrency
 
 All stateful components use lock-free message-passing:
 
@@ -89,11 +89,11 @@ StrategyStore    → Actor (atomic file operations)
 ```
 
 **Benefits**:
-- 🔒 No deadlocks, no race conditions
-- ⚡ 40-50% performance improvement
-- 🎯 Clean separation of concerns
+- No deadlocks, no race conditions
+- 40-50% performance improvement
+- Clean separation of concerns
 
-### **5. Composable Risk Management** (v0.3.0)
+### 5. Composable Risk Management
 
 Build custom risk pipelines with the new `RiskCheckBuilder`:
 
@@ -117,7 +117,7 @@ for check in checks {
 - `TokenSecurityCheck`: Blacklist/whitelist management
 - `CompositeCheck`: Combine multiple checks
 
-### **6. Background Maintenance** (v0.3.0)
+### 6. Background Maintenance
 
 Automatic resource cleanup for long-running deployments:
 
@@ -134,7 +134,7 @@ maintenance.start_file_compaction(store, config);
 maintenance.shutdown().await;
 ```
 
-### **7. Dynamic Skill System**
+### 7. Dynamic Skill System
 
 Load new capabilities at runtime using Markdown manifests:
 
@@ -150,12 +150,12 @@ Executes Solana token swaps via Jupiter aggregator.
 ```
 
 **Features**:
-- 🔥 Hot-reload without process restart
-- 🛡️ Configurable execution sandboxing
-- ⏱️ Timeout and resource limits
-- 📊 Output size constraints
+- Hot-reload without process restart
+- Configurable execution sandboxing
+- Timeout and resource limits
+- Output size constraints
 
-### **8. Execution Pipelines**
+### 8. Execution Pipelines
 
 Build complex trading strategies with structured workflows:
 
@@ -167,7 +167,7 @@ graph LR
 - **Lazy Execution**: Steps run only when needed (save API costs)
 - **Hybrid Logic**: Mix LLM intelligence with Rust safety checks
 
-### **9. Multi-Provider LLM Support**
+### 9. Multi-Provider LLM Support
 
 Plug-and-play support for major LLM providers:
 
@@ -187,9 +187,9 @@ let provider = MoonshotProvider::from_env()?;
 
 ---
 
-## 🏗️ **Architecture**
+## Architecture
 
-### **Project Structure**
+### Project Structure
 
 ```
 aagt/
@@ -199,9 +199,9 @@ aagt/
 │   ├── risk.rs         # Risk management (Actor-based)
 │   ├── memory.rs       # Hybrid memory system
 │   ├── strategy.rs     # Strategy & pipeline engine
-│   ├── maintenance.rs  # Background cleanup (NEW v0.3.0)
+│   ├── maintenance.rs  # Background cleanup
 │   └── risk/
-│       └── checks.rs   # Composable risk checks (NEW v0.3.0)
+│       └── checks.rs   # Composable risk checks
 ├── aagt-providers/     # LLM backends
 │   ├── openai.rs
 │   ├── gemini.rs
@@ -214,7 +214,7 @@ aagt/
     └── solana_swap/    # Example: Solana trading
 ```
 
-### **Technical Highlights**
+### Technical Highlights
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
@@ -226,22 +226,22 @@ aagt/
 
 ---
 
-## 🔐 **Security Design**
+## Security Design
 
-### **Three-Layer Protection**
+### Three-Layer Protection
 
 1. **Proposal Mechanism**  
    External scripts submit trade proposals, cannot execute directly.
 
 2. **Risk Manager (Actor-Isolated)**  
-   - ✅ Max single trade amount
-   - ✅ Max daily volume (stateful, persisted)
-   - ✅ Slippage tolerance
-   - ✅ Minimum liquidity
-   - ✅ Rug pull detection
-   - ✅ Cooldown periods
+   - Max single trade amount
+   - Max daily volume (stateful, persisted)
+   - Slippage tolerance
+   - Minimum liquidity
+   - Rug pull detection
+   - Cooldown periods
 
-3. **Execution Sandboxing** (v0.3.0)  
+3. **Execution Sandboxing**  
    ```rust
    SkillExecutionConfig {
        timeout_secs: 15,           // Force-kill after timeout
@@ -251,22 +251,22 @@ aagt/
    }
    ```
 
-### **Environment Security**
+### Environment Security
 
-- ✅ API keys **only** from environment variables
-- ✅ No hardcoded secrets
-- ✅ File-based data ownership (your server)
+- API keys **only** from environment variables
+- No hardcoded secrets
+- File-based data ownership (your server)
 
 ---
 
-## 📦 **Installation**
+## Installation
 
-### **Prerequisites**
+### Prerequisites
 
 - **Rust**: 1.75+ (install via [rustup](https://rustup.rs/))
 - **Operating System**: Linux (recommended), macOS, Windows
 
-### **Quick Start**
+### Quick Start
 
 1. **Clone the repository**:
    ```bash
@@ -294,9 +294,9 @@ aagt/
 
 ---
 
-## 🚀 **Usage Examples**
+## Usage Examples
 
-### **Creating a Basic Agent**
+### Creating a Basic Agent
 
 ```rust
 use aagt_core::prelude::*;
@@ -318,7 +318,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-### **Configuring Risk Management**
+### Configuring Risk Management
 
 ```rust
 use aagt_core::prelude::*;
@@ -339,7 +339,7 @@ let risk_manager = RiskManager::with_config(
 ).await?;
 ```
 
-### **Using Composable Risk Checks** (v0.3.0)
+### Using Composable Risk Checks
 
 ```rust
 // Build custom risk pipeline
@@ -369,7 +369,7 @@ let context = TradeContext {
 risk_manager.check_and_reserve(&context).await?;
 ```
 
-### **Background Maintenance** (v0.3.0)
+### Background Maintenance
 
 ```rust
 use aagt_core::prelude::*;
@@ -394,9 +394,9 @@ maintenance.shutdown().await;
 
 ---
 
-## 🖥️ **Deployment Guide**
+## Deployment Guide
 
-### **1GB VPS Optimization**
+### 1GB VPS Optimization
 
 Recommended configuration for minimal resource usage:
 
@@ -425,7 +425,7 @@ let skill_config = SkillExecutionConfig {
 };
 ```
 
-### **System-Level Optimization**
+### System-Level Optimization
 
 ```bash
 # Add swap space (safety buffer)
@@ -440,7 +440,7 @@ echo 'vm.swappiness=10' | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
 ```
 
-### **Systemd Service**
+### Systemd Service
 
 Create `/etc/systemd/system/aagt.service`:
 
@@ -473,7 +473,7 @@ sudo systemctl start aagt
 sudo systemctl status aagt
 ```
 
-### **Monitoring**
+### Monitoring
 
 ```bash
 # Check memory usage
@@ -488,9 +488,9 @@ tail -f logs/agent.log | grep -E "Trade|Risk|Error"
 
 ---
 
-## 📊 **Performance Benchmarks**
+## Performance Benchmarks
 
-### **Memory Usage** (v0.3.0)
+### Memory Usage
 
 ```
 Idle state:         80-120 MB
@@ -498,14 +498,14 @@ Active trading:     150-250 MB
 Peak load:          300-400 MB (safe on 1GB VPS)
 ```
 
-### **Throughput**
+### Throughput
 
 ```
 Single agent:       1,000+ requests/sec
 Multi-agent (4):    3,500+ requests/sec
 ```
 
-### **Latency**
+### Latency
 
 ```
 In-memory check:    <1 ms
@@ -515,153 +515,46 @@ Risk verification:  2-8 ms
 
 ---
 
-## 🆕 **What's New in v0.3.0**
+## Roadmap
 
-### **Major Improvements**
+### Completed
+- Actor-based concurrency
+- Composable risk checks
+- Background maintenance
+- 1GB VPS optimization
+- Multi-provider LLM support
 
-1. **Actor Model Unification**  
-   All stateful components (RiskManager, FileStore, StrategyStore) now use lock-free actor architecture.
+### In Progress
+- WebAssembly skill sandboxing
+- Real-time metrics API
+- Advanced monitoring dashboard
 
-2. **Composable Risk Checks**  
-   New `RiskCheckBuilder` and pluggable risk check system.
-
-3. **Background Maintenance**  
-   Automatic memory cleanup and file compaction for long-running deployments.
-
-4. **Enhanced Skill Security**  
-   Configurable execution sandboxing with timeout, output limits, and network isolation.
-
-5. **Performance Optimization**  
-   40-50% improvement in concurrent scenarios, reduced memory footprint.
-
-### **Upgrade Guide**
-
-All changes are **100% backward compatible**. Existing code works without modification.
-
-Optional new features:
-```rust
-// OLD: Still works
-let risk_manager = RiskManager::new().await?;
-
-// NEW: Enhanced with custom checks
-let checks = RiskCheckBuilder::new()
-    .max_trade_amount(5000.0)
-    .build();
-for check in checks {
-    risk_manager.add_check(check);
-}
-```
-
-See [REFACTORING_REPORT.md](REFACTORING_REPORT.md) for full details.
+### Future
+- Distributed actor support (multi-node)
+- Cross-node state synchronization
+- ML-based risk prediction
+- Built-in backtesting framework
 
 ---
 
-## 📚 **Documentation**
-
-- [Quick Start Guide](QUICK_START.md) - Get started in 5 minutes
-- [Refactoring Report](REFACTORING_REPORT.md) - v0.2.0 technical details
-- [Deep Refactoring Report](DEEP_REFACTORING_REPORT.md) - v0.3.0 architecture improvements
-- [Final Summary](FINAL_SUMMARY.md) - Complete overview of all changes
-
-### **Examples**
-
-```bash
-# Basic agent
-cargo run --example basic_agent
-
-# File store usage
-cargo run --example file_store_usage
-
-# Risk management
-cargo run --example risk_management
-
-# Strategy pipeline
-cargo run --example strategy_pipeline
-
-# Skill loader
-cargo run --example skill_loader_prototype
-
-# Complete refactoring demo
-cargo run --example refactored_demo
-
-# Deep refactoring (v0.3.0 features)
-cargo run --example deep_refactoring_demo
-```
-
----
-
-## 🧪 **Testing**
-
-```bash
-# Run all unit tests
-cargo test --workspace --lib
-
-# Run all tests (including integration)
-cargo test --workspace
-
-# Run specific test
-cargo test risk_check_builder
-
-# With output
-cargo test -- --nocapture
-```
-
-**Test Coverage**: 25 unit tests, 8 integration tests
-
----
-
-## 🛣️ **Roadmap**
-
-### **Completed** ✅
-- [x] Actor-based concurrency
-- [x] Composable risk checks
-- [x] Background maintenance
-- [x] 1GB VPS optimization
-- [x] Multi-provider LLM support
-
-### **In Progress** 🚧
-- [ ] WebAssembly skill sandboxing
-- [ ] Real-time metrics API
-- [ ] Advanced monitoring dashboard
-
-### **Future** 📅
-- [ ] Distributed actor support (multi-node)
-- [ ] Cross-node state synchronization
-- [ ] ML-based risk prediction
-- [ ] Built-in backtesting framework
-
----
-
-## ⚠️ **Disclaimer**
+## Disclaimer
 
 This software is for **educational and research purposes**. Cryptocurrency trading involves significant financial risk. **The authors are not responsible for financial losses.** Always:
 
-- ✅ Test strategies in simulation mode first
-- ✅ Start with small amounts
-- ✅ Never invest more than you can afford to lose
-- ✅ Understand the risks of automated trading
+- Test strategies in simulation mode first
+- Start with small amounts
+- Never invest more than you can afford to lose
+- Understand the risks of automated trading
 
 ---
 
-## 🤝 **Contributing**
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing`)
-5. Open a Pull Request
-
----
-
-## 📄 **License**
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 💖 **Support the Project**
+## Support the Project
 
 If you find AAGT useful, consider supporting the developers:
 
@@ -673,12 +566,11 @@ If you find AAGT useful, consider supporting the developers:
 
 ---
 
-## 🔗 **Links**
+## Links
 
-- **GitHub**: https://github.com/undead-undead/aagt
-- **Documentation**: [QUICK_START.md](QUICK_START.md)
+- **Documentation**: See project docs in repository
 - **Issues**: https://github.com/undead-undead/aagt/issues
 
 ---
 
-**Built with ❤️ in Rust | Production-Ready v0.3.0**
+**Built with Rust | Production-Ready v0.3.0**
