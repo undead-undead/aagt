@@ -35,7 +35,7 @@ graph LR
 - **Lazy Execution**: Steps only run when needed (saving tokens and API costs).
 - **Hybrid Logic**: Mix LLM intelligence with hard-coded Rust logic (e.g., rigid risk controls).
 
-### 4. Dynamic Skill Module (Scheme B)
+### 4. Dynamic Skill Module
 - **Plugin Architecture**: Load new capabilities at runtime using `.md` manifests and external scripts (Python, Rust, etc.).
 - **Hot-Reloading**: Add or modify skills in the `skills/` directory without restarting the core process.
 - **Safety routing**: All transactional outputs from dynamic scripts are intercepted as "proposals" and routed through the `RiskManager`.
