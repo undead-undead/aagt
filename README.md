@@ -59,9 +59,10 @@ LongTermMemory: FileStore (JSONL) or Qdrant (vectors)
 
 AAGT ensures data safety and multi-tenant security through differentiated persistence and isolation strategies:
 
-**1. Short-Term Memory (Context Isolation)**
+**1. Short-Term Memory (Context Persistence)**
+- **Upgrade**: Now features **Automated Persistence** (previously ephemeral/memory-only).
 - **Saving Method**: **Atomic Snapshot (Write-then-Rename)**.
-- **Trigger**: Every write (`store`) or `clear` operation triggers an asynchronous, atomic write to a JSON file. By writing to a `.tmp` file and then renaming it, AAGT ensures context data never becomes corrupted if the process restarts mid-save.
+- **Trigger**: Every write (`store`) or `clear` operation automatically triggers an asynchronous, atomic flush to disk. This ensures conversation history is **preserved across process restarts**, eliminating context loss during VPS maintenance or updates.
 - **Isolation**: 
   - **Logical**: Uses composite keys (`user_id:agent_id`) to maintain strict separation of conversation state in memory.
   - **Physical**: Supports independent persistence paths per instance, allowing isolated storage for different users or agents.
@@ -79,10 +80,10 @@ AAGT ensures data safety and multi-tenant security through differentiated persis
 AAGT implements a dual-layer memory architecture to balance performance and persistence:
 
 **1. Context Layer (Short-Term)**
-- **Storage**: RAM (`DashMap`)
-- **Retention**: Ephemeral (lost on restart)
+- **Storage**: RAM (`DashMap`) + **Disk Persistence** (JSON).
+- **Retention**: **Persistent** (Previously ephemeral).
 - **Purpose**: Maintains active conversation context. Optimized for high-frequency R/W.
-- **Why**: Keep trade execution fast and context window clean.
+- **Why**: Ensures that if the agent restarts, the conversation history is immediately restored from disk.
 
 **2. Knowledge Layer (Long-Term)**
 - **Storage**: Disk (`data/memory.jsonl`)
