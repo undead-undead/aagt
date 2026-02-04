@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
     // In a real TDD scenario, we might add a 'Panic' command for testing.
 
     println!("\n--- 2. Testing Memory Isolation ---");
-    let mem_manager = MemoryManager::with_capacity(10, 100, PathBuf::from("data/audit_test_memory.jsonl")).await?;
+    let mem_manager = MemoryManager::with_capacity(10, 10, 100, PathBuf::from("data/audit_test_memory.jsonl")).await?;
     
     let entry1 = MemoryEntry {
         id: "1".to_string(),

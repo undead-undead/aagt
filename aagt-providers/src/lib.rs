@@ -31,6 +31,9 @@ pub mod deepseek;
 #[cfg(feature = "openrouter")]
 pub mod openrouter;
 
+#[cfg(feature = "moonshot")]
+pub mod moonshot;
+
 /// HTTP client configuration
 #[derive(Clone)]
 pub struct HttpConfig {

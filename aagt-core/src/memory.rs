@@ -8,22 +8,24 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::message::Message;
+use crate::message::{Message, Role, Content};
 use crate::store::file::{FileStore, FileStoreConfig};
 use crate::rag::VectorStore;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use async_trait::async_trait;
 
 /// Trait for memory implementations
+#[async_trait]
 pub trait Memory: Send + Sync {
     /// Store a message
-    fn store(&self, user_id: &str, agent_id: Option<&str>, message: Message);
+    async fn store(&self, user_id: &str, agent_id: Option<&str>, message: Message) -> crate::error::Result<()>;
 
     /// Retrieve recent messages
-    fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message>;
+    async fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message>;
 
     /// Clear memory for a user
-    fn clear(&self, user_id: &str, agent_id: Option<&str>);
+    async fn clear(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<()>;
 }
 
 /// Short-term memory - stores recent conversation history
@@ -31,22 +33,28 @@ pub trait Memory: Send + Sync {
 pub struct ShortTermMemory {
     /// Max messages to keep per user
     max_messages: usize,
+    /// Max active users/contexts to keep in memory (DoS protection)
+    max_users: usize,
     /// Storage: composite_key -> message ring buffer
     store: DashMap<String, VecDeque<Message>>,
+    /// Track last access time for cleanup
+    last_access: DashMap<String, std::time::Instant>,
 }
 
 impl ShortTermMemory {
     /// Create with custom capacity
-    pub fn new(max_messages: usize) -> Self {
+    pub fn new(max_messages: usize, max_users: usize) -> Self {
         Self {
             max_messages,
+            max_users,
             store: DashMap::new(),
+            last_access: DashMap::new(),
         }
     }
 
-    /// Create with default capacity (100 messages per user)
+    /// Create with default capacity (100 messages per user, 1000 active users)
     pub fn default_capacity() -> Self {
-        Self::new(100)
+        Self::new(100, 1000)
     }
 
     /// Get current message count for a user/agent pair
@@ -63,34 +71,100 @@ impl ShortTermMemory {
             user_id.to_string()
         }
     }
+    /// Prune inactive users (older than duration)
+    pub fn prune_inactive(&self, duration: std::time::Duration) {
+        let now = std::time::Instant::now();
+        // DashMap retain is efficient
+        self.last_access.retain(|key, last_time| {
+            let keep = now.duration_since(*last_time) < duration;
+            if !keep {
+                self.store.remove(key);
+            }
+            keep
+        });
+    }
+
+    /// Check and enforce total user capacity (LRU eviction)
+    fn enforce_user_capacity(&self) {
+        // Fix: If we are AT capacity (or over), we must evict before adding a new one.
+        if self.store.len() < self.max_users {
+            return;
+        }
+
+        // Simple LRU: Find oldest access time and remove
+        // Ideally we would use a more specialized LRU cache data structure, 
+        // but iterating DashMap random sample or finding min is generic enough for "personal use" protection.
+        
+        // Optimization: Just remove a few random if we are way over, or find oldest.
+        // For strict correctness, we find oldest.
+        // Note: iter() on DashMap can be expensive if huge, but we only do this when full.
+        
+        let mut oldest_key = None;
+        let mut oldest_time = std::time::Instant::now();
+
+        for r in self.last_access.iter() {
+            if *r.value() < oldest_time {
+                oldest_time = *r.value();
+                oldest_key = Some(r.key().clone());
+            }
+        }
+
+        if let Some(key) = oldest_key {
+            self.store.remove(&key);
+            self.last_access.remove(&key);
+        }
+    }
 }
 
+#[async_trait]
 impl Memory for ShortTermMemory {
-    fn store(&self, user_id: &str, agent_id: Option<&str>, message: Message) {
+    async fn store(&self, user_id: &str, agent_id: Option<&str>, message: Message) -> crate::error::Result<()> {
         let key = self.key(user_id, agent_id);
-        let mut entry = self.store.entry(key).or_default();
+        
+        // Enforce capacity before inserting new user
+        if !self.store.contains_key(&key) {
+             self.enforce_user_capacity();
+        }
+
+        let mut entry = self.store.entry(key.clone()).or_default();
 
         // Ring buffer behavior: remove oldest if at capacity
         if entry.len() >= self.max_messages {
             entry.pop_front();
         }
         entry.push_back(message);
+        
+        // Update access time
+        self.last_access.insert(key, std::time::Instant::now());
+
+        // Probabilistic cleanup (1% chance)
+        if fastrand::usize(..100) == 0 {
+             self.prune_inactive(std::time::Duration::from_secs(3600)); // 1 hour timeout
+        }
+
+        Ok(())
     }
 
-    fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
+
+    async fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
         let key = self.key(user_id, agent_id);
         self.store
             .get(&key)
             .map(|v| {
+                // Update access time
+                self.last_access.insert(key, std::time::Instant::now());
+                
                 let skip = v.len().saturating_sub(limit);
                 v.iter().skip(skip).cloned().collect()
             })
             .unwrap_or_default()
     }
 
-    fn clear(&self, user_id: &str, agent_id: Option<&str>) {
+    async fn clear(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<()> {
         let key = self.key(user_id, agent_id);
         self.store.remove(&key);
+        self.last_access.remove(&key);
+        Ok(())
     }
 }
 
@@ -169,7 +243,8 @@ impl LongTermMemory {
             // We need timestamp to sort, so we can't just use find_ids.
             // We need to fetch metadata at least.
             // FileStore::find returns Documents which contain metadata.
-            let docs = store.find(move |idx| {
+            // Optimized: Use find_metadata to avoid hydrating content
+            let docs = store.find_metadata(move |idx| {
                 if idx.get_metadata("user_id") != Some(&uid_filter) { return false; }
                 if let Some(ref target_aid) = aid_filter {
                     if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
@@ -182,9 +257,9 @@ impl LongTermMemory {
             }
 
             // Parse timestamps and sort
-            let mut entries: Vec<(String, i64)> = docs.into_iter().filter_map(|d| {
-                let ts = d.metadata.get("timestamp")?.parse::<i64>().ok()?;
-                Some((d.id, ts))
+            let mut entries: Vec<(String, i64)> = docs.into_iter().filter_map(|idx| {
+                let ts = idx.get_metadata("timestamp")?.parse::<i64>().ok()?;
+                Some((idx.id, ts))
             }).collect();
 
             // Sort: Oldest first (ascending timestamp)
@@ -283,67 +358,60 @@ impl LongTermMemory {
     }
 
     /// Clear all entries for a user
-    pub async fn clear(&self, user_id: &str, agent_id: Option<&str>) {
-        // Inefficient but functional for FileStore
-        let all = self.store.get_all().await;
-        for doc in all {
-            if doc.metadata.get("user_id").map(|s| s.as_str()) == Some(user_id) {
-                if let Some(aid) = agent_id {
-                    if doc.metadata.get("agent_id").map(|s| s.as_str()) != Some(aid) {
-                        continue;
-                    }
-                }
-                self.store.delete(&doc.id).await.ok();
-            }
-        }
+    // Inefficient clear removed in favor of trait implementation
+    pub async fn clear_deprecated(&self, user_id: &str, agent_id: Option<&str>) {
+        let _ = <Self as Memory>::clear(self, user_id, agent_id).await;
     }
 }
 
+#[async_trait]
 impl Memory for LongTermMemory {
-    fn store(&self, _user_id: &str, _agent_id: Option<&str>, _message: Message) {
-         // LongTermMemory doesn't auto-store Messages via trait yet.
-         // It uses store_entry. This is a partial implementation.
-         tracing::warn!("LongTermMemory::store(Message) not implemented directly. Use store_entry.");
+    async fn store(&self, user_id: &str, agent_id: Option<&str>, message: Message) -> crate::error::Result<()> {
+         let entry = MemoryEntry {
+             id: uuid::Uuid::new_v4().to_string(),
+             user_id: user_id.to_string(),
+             content: message.content.as_text(),
+             timestamp: chrono::Utc::now().timestamp_millis(),
+             tags: vec![message.role.as_str().to_string(), "conversation".to_string()],
+             relevance: 1.0, 
+         };
+         
+         // Fix #4: Await the result, no background spawn
+         self.store_entry(entry, agent_id).await
     }
 
-    fn retrieve(&self, _user_id: &str, _agent_id: Option<&str>, _limit: usize) -> Vec<Message> {
-         // This is a bit of a hack to map MemoryEntry -> Message for trait compliance if needed.
-         // But usually LongTermMemory is used explicitly.
-         // For now, we return empty or implement basic mapping.
-         // Let's implement basic mapping using retrieve_recent
-         // We need async traversal though, and this trait is sync?
-         // Ah, the trait methods are sync but implementations might need async.
-         // The trait definition earlier was not async. But LongTermMemory is backed by async FileStore.
-         // This implies LongTermMemory cannot easily implement the synchronous Memory trait
-         // unless we use block_in_place or change trait to async.
-         // Checking original file... trait `Memory` methods were NOT async.
-         // And `ShortTermMemory` is sync (DashMap).
-         // So `LongTermMemory` probably shouldn't implement `Memory` if it requires async, OR we spawn blocking.
-         // Since this is a specialized fix, I will keep LongTermMemory as-is (not implementing Memory or implementing no-op)
-         // and focus on ShortTermMemory which is the main target for "Context Pollution".
-         vec![]
+    async fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
+         // Map Entry -> Message
+         let entries = self.retrieve_recent(user_id, agent_id, limit * 100).await; // char limit approximate
+         entries.into_iter().map(|e| {
+             let role = if e.tags.contains(&"user".to_string()) { Role::User } else { Role::Assistant };
+             Message {
+                 role,
+                 name: None,
+                 content: Content::Text(e.content),
+             }
+         }).take(limit).collect()
     }
     
-    fn clear(&self, user_id: &str, agent_id: Option<&str>) {
-        // Fix #2: OOM Risk
-        // Use find_ids to avoid loading content for deletion logic
+    async fn clear(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<()> {
         let uid = user_id.to_string();
         let aid = agent_id.map(|s| s.to_string());
+        
         let store = self.store.clone();
         
-        tokio::spawn(async move {
-            let ids_to_delete = store.find_ids(move |idx| {
-                if idx.get_metadata("user_id") != Some(&uid) { return false; }
-                if let Some(ref target_aid) = aid {
-                    if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
-                }
-                true
-            }).await;
-
-            for id in ids_to_delete {
-                store.delete(&id).await.ok();
+        // Find IDs first
+        let ids_to_delete = store.find_ids(move |idx| {
+            if idx.get_metadata("user_id") != Some(&uid) { return false; }
+            if let Some(ref target_aid) = aid {
+                 if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
             }
-        });
+            true
+        }).await;
+
+        for id in ids_to_delete {
+            store.delete(&id).await?;
+        }
+        Ok(())
     }
 }
 
@@ -358,13 +426,13 @@ pub struct MemoryManager {
 impl MemoryManager {
     /// Create with default settings (Async)
     pub async fn new() -> crate::error::Result<Self> {
-        Self::with_capacity(100, 1000, PathBuf::from("data/memory.jsonl")).await
+        Self::with_capacity(100, 1000, 1000, PathBuf::from("data/memory.jsonl")).await
     }
 
     /// Create with custom capacities and path
-    pub async fn with_capacity(short_term_max: usize, long_term_max: usize, path: PathBuf) -> crate::error::Result<Self> {
+    pub async fn with_capacity(short_term_max: usize, short_term_users: usize, long_term_max: usize, path: PathBuf) -> crate::error::Result<Self> {
         Ok(Self {
-            short_term: Arc::new(ShortTermMemory::new(short_term_max)),
+            short_term: Arc::new(ShortTermMemory::new(short_term_max, short_term_users)),
             long_term: Arc::new(LongTermMemory::new(long_term_max, path).await?),
         })
     }
@@ -376,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_short_term_memory() {
-        let memory = ShortTermMemory::new(3);
+        let memory = ShortTermMemory::new(3, 10);
 
         memory.store("user1", None, Message::user("Hello"));
         memory.store("user1", None, Message::assistant("Hi there"));

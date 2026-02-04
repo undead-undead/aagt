@@ -9,23 +9,23 @@
 //! - **Search**: Brute-force cosine similarity -> Seek & Read content from disk for top N results.
 //!
 //! # Performance
-//! - Memory: ~6MB per 10k documents (vs ~100MB+ with content).
+//! - Memory: ~1.5MB per 10k documents (vs ~6MB with f32, vs ~100MB+ with content).
 //! - Speed: < 20ms search (IO overhead for top results only).
 
 use crate::rag::{Document, VectorStore, Embeddings};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::io::{Seek, SeekFrom, Write, BufRead};
 use tokio::fs::{self, OpenOptions};
-use tokio::io::{AsyncWriteExt, AsyncBufReadExt, AsyncSeekExt, SeekFrom, AsyncReadExt};
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, AsyncReadExt};
 use tokio::sync::{RwLock, mpsc, oneshot};
 use rayon::prelude::*;
 use std::os::unix::fs::FileExt;
 use futures::FutureExt;
-use std::collections::HashSet;
 
 /// Configuration for FileStore
 #[derive(Debug, Clone)]
@@ -47,13 +47,16 @@ pub struct IndexEntry {
     pub id: String,
     /// Store metadata as a boxed slice of tuples to save RAM (no HashMap overhead)
     pub metadata: Box<[(String, String)]>,
-    /// Store embedding as a boxed slice to prevent overallocation
-    pub embedding: Box<[f32]>,
+    /// Store embedding as a boxed slice of i8 (quantized) to save 4x RAM
+    pub embedding: Box<[i8]>,
     /// Byte offset in the file
     pub offset: u64,
     /// Length of the JSON line in bytes
     pub length: u64,
+    /// Timestamp (Unix millis) for Time-Travel
+    pub timestamp: i64,
 }
+
 
 impl IndexEntry {
     /// Get a metadata value by key
@@ -64,7 +67,7 @@ impl IndexEntry {
     }
 }
 
-/// Stored document format (On Disk)
+/// Stored document format (On Disk) - Keeps f32 for full precision recovery if needed
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct StoredDocument {
     id: String,
@@ -100,94 +103,137 @@ struct FileStoreActor {
 impl FileStoreActor {
 
     async fn handle_append(&self, line: String) -> Result<(u64, u64)> {
-        // atomic append relying on OS file locks or just exclusive actor access 
-        // Since we are the only writer, we can Seek(End) and Write.
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .await?;
+        // Use blocking task for proper file locking
+        let path = self.path.clone();
+        
+        tokio::task::spawn_blocking(move || {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| Error::MemoryStorage(format!("IO error: {}", e)))?;
 
-        let offset = file.seek(SeekFrom::End(0)).await?;
-        file.write_all(line.as_bytes()).await?;
-        file.flush().await?; // Ensure it hits disk (or at least OS buffer) safely
+            use fs2::FileExt;
+            file.lock_exclusive()
+                .map_err(|e| Error::Internal(format!("Lock failure: {}", e)))?;
 
-        let length = line.len() as u64;
-        Ok((offset, length))
+            let offset = file.seek(SeekFrom::End(0))
+                .map_err(|e| Error::MemoryStorage(format!("Seek error: {}", e)))?;
+                
+            use std::io::Write;
+            file.write_all(line.as_bytes())
+                .map_err(|e| Error::MemoryStorage(format!("Write error: {}", e)))?;
+            file.flush()?; 
+            
+            file.unlock().ok();
+
+            let length = line.len() as u64;
+            Ok((offset, length))
+        }).await.map_err(|e| Error::Internal(format!("Join error: {}", e)))?
     }
 
     async fn handle_compact(&self, deleted_ids: HashSet<String>) -> Result<HashMap<String, u64>> {
+        let path = self.path.clone();
         let tmp_path = self.path.with_extension("compact");
         
-        let mut reader = tokio::io::BufReader::new(
-            tokio::fs::File::open(&self.path).await?
-        );
-        
-        let mut writer = tokio::io::BufWriter::new(
-            tokio::fs::File::create(&tmp_path).await?
-        );
+        tokio::task::spawn_blocking(move || {
+             use fs2::FileExt;
+             
+             // Open original file with exclusive lock to prevent appends during compaction
+             let file = std::fs::File::open(&path)
+                .map_err(|e| Error::MemoryStorage(format!("Failed to open for compaction: {}", e)))?;
+             file.lock_exclusive()
+                .map_err(|e| Error::Internal(format!("Lock failure: {}", e)))?;
+             
+             let mut reader = std::io::BufReader::new(&file);
+             let mut writer = std::io::BufWriter::new(
+                 std::fs::File::create(&tmp_path)?
+             );
 
-        let mut new_offsets = HashMap::new();
-        let mut current_offset = 0u64;
-        let mut buffer = String::new();
-
-        loop {
-            buffer.clear();
-            let bytes_read = reader.read_line(&mut buffer).await?;
-            if bytes_read == 0 {
-                break;
-            }
-
-            // Sniff ID without full parse if possible, or just parse generic
-            // Using a minimal struct for ID extraction is reasonably fast
-            #[derive(Deserialize)]
-            struct DocHeader { id: String }
+            let mut new_offsets = HashMap::new();
+            let mut current_offset = 0u64;
+            let mut buffer = String::new();
             
-            if let Ok(header) = serde_json::from_str::<DocHeader>(&buffer) {
-                if !deleted_ids.contains(&header.id) {
-                    // Keep it
-                    writer.write_all(buffer.as_bytes()).await?;
-                    new_offsets.insert(header.id, current_offset);
-                    current_offset += buffer.len() as u64;
-                }
-            } else {
-                 // Skip malformed lines or pass them through? 
-                 // If we pass through, we might keep garbage. Safest is to skip unless we want to preserve corruption?
-                 // Let's skip.
-                 tracing::warn!("Compaction found malformed line");
-            }
-        }
+            use std::io::BufRead;
 
-        writer.flush().await?;
-        drop(writer); // Ensure closed
-        drop(reader); // Ensure closed
-        
-        tokio::fs::rename(tmp_path, &self.path).await?;
-        
-        Ok(new_offsets)
+            loop {
+                buffer.clear();
+                let bytes_read = reader.read_line(&mut buffer)?;
+                if bytes_read == 0 {
+                    break;
+                }
+
+                #[derive(Deserialize)]
+                struct DocHeader { id: String }
+                
+                if let Ok(header) = serde_json::from_str::<DocHeader>(&buffer) {
+                    if !deleted_ids.contains(&header.id) {
+                        use std::io::Write;
+                        writer.write_all(buffer.as_bytes())?;
+                        new_offsets.insert(header.id, current_offset);
+                        current_offset += buffer.len() as u64;
+                    }
+                }
+            }
+
+            writer.flush()?;
+            drop(writer);
+            drop(reader);
+            // Unlock original before renaming over it
+            file.unlock().ok();
+            drop(file);
+            
+            std::fs::rename(tmp_path, &path)?;
+            
+            Ok(new_offsets)
+        }).await.map_err(|e| Error::Internal(format!("Join error: {}", e)))?
     }
 
-    async fn read_one(path: &PathBuf, offset: u64, length: u64) -> Result<StoredDocument> {
-        let mut file = fs::File::open(path).await?;
-        file.seek(SeekFrom::Start(offset)).await?;
-        let mut buffer = vec![0u8; length as usize];
-        file.read_exact(&mut buffer).await?;
-        let s = String::from_utf8(buffer).map_err(|e| Error::MemoryStorage(format!("UTF8 error: {}", e)))?;
-        serde_json::from_str(&s).map_err(|e| Error::MemoryStorage(format!("JSON error: {}", e)))
+    // Helper for batch reading in one go
+    // This is NOT an actor message handler but a static helper we'll use in FileStore::search
+    async fn read_batch(path: PathBuf, reads: Vec<(u64, u64)>) -> Result<Vec<StoredDocument>> {
+        tokio::task::spawn_blocking(move || {
+             let mut file = std::fs::File::open(&path)
+                .map_err(|e| Error::MemoryStorage(format!("Failed to open for batch read: {}", e)))?;
+             
+             // Shared lock for reading? Optional but good for consistency
+             // But 'pred' doesn't require locking usually if we don't care about torn reads on append (which shouldn't happen with atomic writes)
+             // fs2::lock_shared might block if compaction is running, which is GOOD.
+             use fs2::FileExt;
+             file.lock_shared().ok(); // Best effort lock
+             
+             let mut results = Vec::with_capacity(reads.len());
+             use std::os::unix::fs::FileExt as UnixFileExt; // For read_at
+
+             for (offset, length) in reads {
+                 let mut buffer = vec![0u8; length as usize];
+                 if let Err(_) = file.read_exact_at(&mut buffer, offset) {
+                     continue; // Skip failed reads
+                 }
+                 if let Ok(s) = String::from_utf8(buffer) {
+                     if let Ok(doc) = serde_json::from_str::<StoredDocument>(&s) {
+                         results.push(doc);
+                     }
+                 }
+             }
+             
+             file.unlock().ok();
+             Ok(results)
+        }).await.map_err(|e| Error::Internal(format!("Join error: {}", e)))?
     }
 
     async fn handle_save_snapshot(&self, indices: Vec<IndexEntry>) -> Result<()> {
         let snap_path = self.path.with_extension("index");
-        // Do serialization in spawn_blocking to avoid blocking executor
-        let bytes = tokio::task::spawn_blocking(move || {
-            bincode::serialize(&indices)
-                .map_err(|e| Error::Internal(format!("Failed to serialize index: {}", e)))
-        }).await.map_err(|e| Error::Internal(format!("Snapshot task join error: {}", e)))??;
+        
+        tokio::task::spawn_blocking(move || {
+            let bytes = bincode::serialize(&indices)
+                .map_err(|e| Error::Internal(format!("Failed to serialize index: {}", e)))?;
 
-        // Fix #3: Atomic Write Pattern
-        let tmp_path = snap_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-        tokio::fs::write(&tmp_path, bytes).await?;
-        tokio::fs::rename(&tmp_path, &snap_path).await?;
+            let tmp_path = snap_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+            std::fs::write(&tmp_path, bytes)?;
+            std::fs::rename(&tmp_path, &snap_path)?;
+            Ok::<(), Error>(())
+        }).await.map_err(|e| Error::Internal(format!("Snapshot task join error: {}", e)))??;
         Ok(())
     }
 }
@@ -203,7 +249,8 @@ pub struct FileStore {
     /// Channel to Actor
     sender: mpsc::Sender<StoreMessage>,
     /// Persistent read handle for efficient random access
-    reader: Arc<std::sync::RwLock<std::fs::File>>,
+    /// Wrapped in Arc<File> to allow cheap cloning of the handle for race-free independent reads
+    reader: Arc<std::sync::RwLock<Arc<std::fs::File>>>,
     /// Track deleted items for smart compaction (Blocklist)
     deleted_ids: Arc<RwLock<HashSet<String>>>,
 }
@@ -272,7 +319,7 @@ impl FileStore {
             indices,
             embedder: None,
             sender: tx,
-            reader: Arc::new(std::sync::RwLock::new(reader)),
+            reader: Arc::new(std::sync::RwLock::new(Arc::new(reader))),
             deleted_ids: Arc::new(RwLock::new(HashSet::new())),
         };
         
@@ -322,14 +369,18 @@ impl FileStore {
 
             // Parse document
             if let Ok(doc) = serde_json::from_str::<StoredDocument>(&buffer) {
+                let timestamp = Self::extract_timestamp(&doc.metadata);
                 let metadata: Vec<(String, String)> = doc.metadata.into_iter().collect();
                 indices.push(IndexEntry {
                     id: doc.id,
                     metadata: metadata.into_boxed_slice(),
-                    embedding: doc.embedding.into_boxed_slice(),
+                    embedding: Self::quantize(&doc.embedding).into_boxed_slice(),
                     offset,
                     length: bytes_read as u64,
+                    timestamp,
                 });
+
+
             } else {
                 tracing::warn!("Skipping malformed line in FileStore at offset {}", offset);
             }
@@ -346,7 +397,22 @@ impl FileStore {
     }
 
     fn snapshot_path(&self) -> std::path::PathBuf {
-        self.config.path.with_extension("index")
+        self.config.path.with_extension("index_v2") // Bump version to invalidate old snapshots
+    }
+
+    /// Extract timestamp from metadata or return 0
+    fn extract_timestamp(metadata: &HashMap<String, String>) -> i64 {
+        metadata.get("timestamp")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0)
+    }
+
+    /// Extract timestamp from slice metadata or return 0
+    fn extract_timestamp_from_slice(metadata: &[(String, String)]) -> i64 {
+        metadata.iter()
+            .find(|(k, _)| k == "timestamp")
+            .and_then(|(_, v)| v.parse::<i64>().ok())
+            .unwrap_or(0)
     }
 
     async fn try_load_snapshot(&self) -> Result<Option<Vec<IndexEntry>>> {
@@ -374,30 +440,52 @@ impl FileStore {
          let _ = self.sender.send(StoreMessage::SaveSnapshot { indices: indices.to_vec() }).await;
     }
 
-    /// Cosine similarity between two vectors
-    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    /// Quantize f32 vector to i8 (-127 to 127) simple linear scaling
+    fn quantize(vec: &[f32]) -> Vec<i8> {
+        vec.iter().map(|&x| (x.clamp(-1.0, 1.0) * 127.0) as i8).collect()
+    }
+
+    /// Cosine similarity between two quantized vectors (i8)
+    /// Accumulates in i32 to prevent overflow, then returns f32 score
+    fn cosine_similarity_i8(a: &[i8], b: &[i8]) -> f32 {
         if a.len() != b.len() { return 0.0; }
         
-        let dot_product: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        // Use i32 accumulator to prevent overflow
+        let mut dot_product: i32 = 0;
+        let mut norm_a_sq: i32 = 0;
+        let mut norm_b_sq: i32 = 0;
+
+        for (&x, &y) in a.iter().zip(b) {
+            let x_i32 = x as i32;
+            let y_i32 = y as i32;
+            dot_product += x_i32 * y_i32;
+            norm_a_sq += x_i32 * x_i32;
+            norm_b_sq += y_i32 * y_i32;
+        }
         
-        if norm_a == 0.0 || norm_b == 0.0 { 0.0 } else { dot_product / (norm_a * norm_b) }
+        let norm_a = (norm_a_sq as f32).sqrt();
+        let norm_b = (norm_b_sq as f32).sqrt();
+        
+        if norm_a == 0.0 || norm_b == 0.0 { 0.0 } else { (dot_product as f32) / (norm_a * norm_b) }
     }
-    async fn read_content(&self, offset: u64, length: u64) -> Result<StoredDocument> {
+
+    async fn read_content(&self, offset: u64, length: u64, reader_override: Option<Arc<std::fs::File>>) -> Result<StoredDocument> {
         // Use pread (read_at) to avoid seeking and syscall overhead of repeated open()
-        let reader_lock = self.reader.clone(); // Arc clone
+        // If reader_override is provided (Snapshot), use it. Otherwise, acquire current lock.
+        let reader_handle = if let Some(r) = reader_override {
+            r
+        } else {
+            let lock = self.reader.read().map_err(|_| Error::Internal("Failed to acquire reader lock".to_string()))?;
+            lock.clone()
+        };
         
+        // Blocking read on the specific handle
         let bytes = tokio::task::spawn_blocking(move || {
             let mut buffer = vec![0u8; length as usize];
-            // Acquire READ lock on the file handle (Sync lock)
-            if let Ok(handle) = reader_lock.read() {
-                handle.read_exact_at(&mut buffer, offset)
-                    .map_err(|e| Error::MemoryStorage(format!("IO error: {}", e)))?;
-                Ok::<Vec<u8>, Error>(buffer)
-            } else {
-                 Err(Error::Internal("Failed to acquire file lock".to_string()))
-            }
+            use std::os::unix::fs::FileExt; 
+            reader_handle.read_exact_at(&mut buffer, offset)
+                .map_err(|e| Error::MemoryStorage(format!("IO error: {}", e)))?;
+            Ok::<Vec<u8>, Error>(buffer)
         }).await.map_err(|e| Error::Internal(format!("Join error: {}", e)))??;
 
         let s = String::from_utf8(bytes)
@@ -422,7 +510,7 @@ impl FileStore {
             .collect();
         drop(indices);
 
-        self.hydrate_results(matches).await
+        self.hydrate_results(matches, None).await
     }
     
     /// Find documents using a custom predicate on the IndexEntry (Fast)
@@ -436,7 +524,18 @@ impl FileStore {
             .collect();
         drop(indices);
 
-        self.hydrate_results(matches).await
+        self.hydrate_results(matches, None).await
+    }
+
+    /// Optimized: Find metadata without loading content (Fix for Memory Performance)
+    pub async fn find_metadata<F>(&self, predicate: F) -> Vec<IndexEntry>
+    where F: Fn(&IndexEntry) -> bool
+    {
+        let indices = self.indices.read().await;
+        indices.iter()
+            .filter(|idx| predicate(idx))
+            .cloned()
+            .collect()
     }
 
     /// Find document IDs using a custom predicate on the IndexEntry (Fast, No IO)
@@ -455,7 +554,7 @@ impl FileStore {
         let indices = self.indices.read().await;
         let matches = indices.clone();
         drop(indices);
-        self.hydrate_results(matches).await
+        self.hydrate_results(matches, None).await
     }
 
     /// Get the last N documents (Efficient for recent history)
@@ -465,20 +564,25 @@ impl FileStore {
         let start = len.saturating_sub(limit);
         let matches: Vec<IndexEntry> = indices[start..].to_vec();
         drop(indices);
-        self.hydrate_results(matches).await
+        self.hydrate_results(matches, None).await
     }
     
     // Helper to fetch content for indices
-    async fn hydrate_results(&self, matches: Vec<IndexEntry>) -> Vec<Document> {
+    async fn hydrate_results(&self, matches: Vec<IndexEntry>, reader: Option<Arc<std::fs::File>>) -> Vec<Document> {
         let mut results = Vec::new();
         for idx in matches {
-            if let Ok(doc) = self.read_content(idx.offset, idx.length).await {
-                results.push(Document {
-                    id: doc.id,
-                    content: doc.content,
-                    metadata: doc.metadata,
-                    score: 1.0,
-                });
+            match self.read_content(idx.offset, idx.length, reader.clone()).await {
+                Ok(doc) => {
+                    results.push(Document {
+                        id: doc.id,
+                        content: doc.content,
+                        metadata: doc.metadata,
+                        score: 1.0,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("FileStore: Failed to hydrate document {}: {}", idx.id, e);
+                }
             }
         }
         results
@@ -515,7 +619,7 @@ impl FileStore {
 
         {
             if let Ok(mut reader) = self.reader.write() {
-                *reader = new_file_handle;
+                *reader = Arc::new(new_file_handle);
             }
         }
 
@@ -546,6 +650,85 @@ impl FileStore {
             self.compact().await?;
         }
         Ok(())
+    }
+
+    /// Time-Travel Search: Search as if it were `as_of` timestamp
+    /// Only considers documents with timestamp <= as_of
+    pub async fn search_snapshot(&self, query: &str, as_of: i64, limit: usize) -> Result<Vec<Document>> {
+        // Generate query embedding
+         let query_embedding: Vec<f32> = if let Some(embedder) = &self.embedder {
+            embedder.embed(query).await?
+        } else {
+            vec![0.0; 1536]
+        };
+
+        let query_quantized = Self::quantize(&query_embedding);
+        
+        // 1. Capture Reader Snapshot FIRST (Atomic View)
+        // We need the file handle that corresponds to the CURRENT indices.
+        // Actually, strictly speaking, we need the handle that corresponds to the indices we are about to read.
+        // If we lock indices then reader, we are safe.
+        
+        let indices_lock = self.indices.read().await;
+        // While holding indices lock, grab the reader handle
+        let reader_snapshot = self.reader.read().unwrap().clone();
+        
+        // Clone indices for processing
+        let indices_clone = indices_lock.clone();
+        drop(indices_lock); // Release lock
+        
+        // Block to search in parallel
+        let scored_indices = tokio::task::spawn_blocking(move || {
+            let indices = indices_clone;
+            
+            // Filter by timestamp THEN calc similarity
+            let mut scored: Vec<(f32, usize)> = indices.par_iter().enumerate()
+                .filter(|(_, idx)| idx.timestamp <= as_of) // Time-Travel Magic
+                .map(|(i, idx)| (Self::cosine_similarity_i8(&query_quantized, &idx.embedding), i))
+                .collect();
+
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            
+            scored.into_iter().take(limit)
+                .map(|(score, i)| (score, indices[i].clone()))
+                .collect::<Vec<_>>()
+                
+        }).await.map_err(|e| Error::Internal(format!("Search task join error: {}", e)))?;
+
+        // Hydrate using the SNAPSHOT reader
+        let mut results = Vec::new();
+        for (score, idx) in scored_indices {
+            // Pass reader snapshot
+            if let Ok(doc) = self.read_content(idx.offset, idx.length, Some(reader_snapshot.clone())).await {
+                results.push(Document {
+                    id: doc.id,
+                    content: doc.content,
+                    metadata: doc.metadata,
+                    score,
+                });
+            }
+        }
+        Ok(results)
+    }
+
+
+
+    /// Filter metadata to keep the in-memory index small
+    fn filter_metadata_for_index(metadata: HashMap<String, String>) -> Vec<(String, String)> {
+        metadata.into_iter()
+            .filter(|(k, v)| {
+                // exclude large content fields
+                let key = k.as_str();
+                if matches!(key, "page_content" | "content" | "text" | "body" | "_embedding" | "embedding") {
+                    return false;
+                }
+                // exclude huge values (e.g. base64 images, long descriptions)
+                if v.len() > 512 {
+                     return false;
+                }
+                true
+            })
+            .collect()
     }
 }
 
@@ -583,14 +766,19 @@ impl VectorStore for FileStore {
             .map_err(|_| Error::Internal("FileStore reply dropped".to_string()))??;
 
         // 3. Update Index
-        let entry_metadata: Vec<(String, String)> = metadata.into_iter().collect();
+        let entry_metadata = Self::filter_metadata_for_index(metadata);
+        let timestamp = Self::extract_timestamp_from_slice(&entry_metadata);
+        
         let entry = IndexEntry {
             id: doc.id.clone(),
             metadata: entry_metadata.into_boxed_slice(),
-            embedding: embedding.into_boxed_slice(),
+            embedding: Self::quantize(&embedding).into_boxed_slice(),
             offset,
             length,
+            timestamp,
         };
+
+
         
         let snapshot_needed = {
             let mut indices = self.indices.write().await;
@@ -615,46 +803,60 @@ impl VectorStore for FileStore {
             vec![0.0; 1536]
         };
 
-        // 1. Memory Search (Indices only) - CPU Bound
-        // We clone the indices to move them into the blocking thread.
-        // For very large indices, we might want to use a read lock inside the thread,
-        // but Arc<RwLock> safely allows reading. However, we simply clone the Arc here.
-        let indices_arc = self.indices.clone();
-        
+        // Quantize query embedding ONCE
+        let query_quantized = Self::quantize(&query_embedding);
+
+        // 1. Capture Reader Snapshot FIRST (Atomic View)
+        let indices_lock = self.indices.read().await;
+        let reader_snapshot = self.reader.read().unwrap().clone();
+        let indices_clone = indices_lock.clone();
+        drop(indices_lock);
+
+        // 2. Memory Search (Indices only) - CPU Bound
         let scored_indices = tokio::task::spawn_blocking(move || {
-            let indices = indices_arc.blocking_read();
-            // Fix #2: Eliminate Memory Bomb (No Clone inside loop)
+            let indices = indices_clone;
+            // Vector Sim Check (Parallel)
             let mut scored: Vec<(f32, usize)> = indices.par_iter().enumerate()
-                .map(|(i, idx)| (Self::cosine_similarity(&query_embedding, &idx.embedding), i))
+                .map(|(i, idx)| (Self::cosine_similarity_i8(&query_quantized, &idx.embedding), i))
                 .collect();
 
             // Sort descending
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             
-            // Limit and Clone Top N
+            // Limit and Clone Snapshot Data
             scored.into_iter().take(limit)
-                .map(|(score, i)| (score, indices[i].clone()))
+                .map(|(score, i)| {
+                    let idx = &indices[i];
+                    (score, idx.offset, idx.length, idx.id.clone(), idx.metadata.clone())
+                })
                 .collect::<Vec<_>>()
                 
         }).await.map_err(|e| Error::Internal(format!("Search task join error: {}", e)))?;
 
-        // 2. Fetch Content (IO Bound - Async)
+        if scored_indices.is_empty() {
+             return Ok(Vec::new());
+        }
+
+        // 3. Hydrate using Snapshot
         let mut results = Vec::new();
-        for (score, idx) in scored_indices {
-            if let Ok(doc) = self.read_content(idx.offset, idx.length).await {
-                results.push(Document {
+        for (score, offset, length, id, metadata) in scored_indices {
+             if let Ok(doc) = self.read_content(offset, length, Some(reader_snapshot.clone())).await {
+                 results.push(Document {
                     id: doc.id,
                     content: doc.content,
-                    metadata: doc.metadata,
+                    metadata: doc.metadata, // Use loaded metadata or index metadata? doc.metadata is safer
                     score,
                 });
-            } else {
-                tracing::warn!("Failed to read content for document {} during search", idx.id);
-            }
+             } else {
+                 // Fallback: use index metadata if read fails? No, content is needed.
+                 // Just Log warning?
+             }
         }
         
         Ok(results)
     }
+
+
 
     async fn delete(&self, id: &str) -> Result<()> {
         // 1. Remove from index (Soft Delete)

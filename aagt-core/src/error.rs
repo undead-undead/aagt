@@ -47,6 +47,13 @@ pub enum Error {
         message: String,
     },
 
+    /// Tool approval required
+    #[error("Tool execution blocked: {tool_name} requires approval but no handler was available")]
+    ToolApprovalRequired {
+        /// Name of the tool
+        tool_name: String,
+    },
+
     /// Invalid tool arguments
     #[error("Invalid tool arguments for {tool_name}: {message}")]
     ToolArguments {

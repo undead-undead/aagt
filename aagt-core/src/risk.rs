@@ -262,7 +262,9 @@ impl RiskActor {
 
         if today > last_reset {
             state.daily_volume_usd = 0.0;
-            state.pending_volume_usd = 0.0;
+            // Fix: Do NOT clear pending volume. Pending volume is reserved for trades 
+            // that haven't committed yet, regardless of when they were reserved.
+            // Clearing it would allow double-spending if a trade reserved 23:59 commits 00:01.
             state.volume_reset = now;
         }
 
@@ -342,13 +344,13 @@ pub struct RiskManager {
 }
 
 impl RiskManager {
-    /// Create with default config and in-memory storage
-    pub fn new() -> Self {
-        Self::with_config(RiskConfig::default(), Arc::new(InMemoryRiskStore))
+    /// Create with default config and in-memory storage (Async)
+    pub async fn new() -> Result<Self> {
+        Self::with_config(RiskConfig::default(), Arc::new(InMemoryRiskStore)).await
     }
 
-    /// Create with custom config and storage
-    pub fn with_config(config: RiskConfig, store: Arc<dyn RiskStateStore>) -> Self {
+    /// Create with custom config and storage (Async)
+    pub async fn with_config(config: RiskConfig, store: Arc<dyn RiskStateStore>) -> Result<Self> {
         let (tx, rx) = mpsc::channel(100);
         
         let actor = RiskActor {
@@ -376,28 +378,46 @@ impl RiskManager {
                     // Actually, if it panics, we might want to reload state from disk
                     // but we have to be careful about pending volume.
                     // For now, just keep the task alive.
-                    while let Some(msg) = actor.receiver.recv().await {
-                         match msg {
-                             RiskCommand::CheckAndReserve { context, checks, reply } => {
-                                 let res = actor.handle_check_and_reserve(context, &checks).await;
-                                 let _ = reply.send(res);
-                             }
-                             RiskCommand::Commit { user_id, amount_usd, reply } => {
-                                 let res = actor.handle_commit(user_id, amount_usd).await;
-                                 let _ = reply.send(res);
-                             }
-                             RiskCommand::Rollback { user_id, amount_usd } => {
-                                 actor.handle_rollback(user_id, amount_usd);
-                             }
-                             RiskCommand::GetRemaining { user_id, reply } => {
-                                 let val = actor.handle_get_remaining(user_id);
-                                 let _ = reply.send(val);
-                             }
-                             RiskCommand::LoadState { reply } => {
-                                 let res = actor.handle_load().await;
-                                 let _ = reply.send(res);
-                             }
-                         }
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                    
+                    loop {
+                        tokio::select! {
+                            maybe_msg = actor.receiver.recv() => {
+                                match maybe_msg {
+                                    Some(msg) => {
+                                         match msg {
+                                             RiskCommand::CheckAndReserve { context, checks, reply } => {
+                                                 let res = actor.handle_check_and_reserve(context, &checks).await;
+                                                 let _ = reply.send(res);
+                                             }
+                                             RiskCommand::Commit { user_id, amount_usd, reply } => {
+                                                 let res = actor.handle_commit(user_id, amount_usd).await;
+                                                 let _ = reply.send(res);
+                                             }
+                                             RiskCommand::Rollback { user_id, amount_usd } => {
+                                                 actor.handle_rollback(user_id, amount_usd);
+                                             }
+                                             RiskCommand::GetRemaining { user_id, reply } => {
+                                                 let val = actor.handle_get_remaining(user_id);
+                                                 let _ = reply.send(val);
+                                             }
+                                             RiskCommand::LoadState { reply } => {
+                                                 let res = actor.handle_load().await;
+                                                 let _ = reply.send(res);
+                                             }
+                                         }
+                                    }
+                                    None => break, // Channel closed
+                                }
+                            }
+                            _ = interval.tick() => {
+                                // Periodic Flush
+                                tracing::debug!("RiskManager: performing periodic state flush");
+                                if let Err(e) = actor.store.save(&actor.state).await {
+                                     tracing::error!("Periodic risk persistence failed: {}", e);
+                                }
+                            }
+                        }
                     }
                 }).catch_unwind().await;
 
@@ -411,19 +431,24 @@ impl RiskManager {
             }
         });
 
-        Self {
+        let manager = Self {
             sender: tx,
             config,
             custom_checks: std::sync::RwLock::new(Vec::new()),
-        }
-    }
-    
-    /// Create and wait for state to be loaded
-    pub async fn new_strict(config: RiskConfig, store: Arc<dyn RiskStateStore>) -> Result<Self> {
-        let manager = Self::with_config(config, store);
+        };
+        
+        // Fix #1: Auto-load state on startup
         manager.load_state().await?;
+        
         Ok(manager)
     }
+    
+    /// Backward compatible Strict constructor (already strict, now matches new behavior but keeps name)
+    pub async fn new_strict(config: RiskConfig, store: Arc<dyn RiskStateStore>) -> Result<Self> {
+        Self::with_config(config, store).await
+    }
+    
+    // ... load_state and other methods remain ...
 
     /// Load state from store
     pub async fn load_state(&self) -> Result<()> {
@@ -500,11 +525,7 @@ impl RiskManager {
     }
 }
 
-impl Default for RiskManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Default trait removed because new() is async. Use RiskManager::new().await instead.
 
 // Tests kept but might need async adjustment if logic changed (it mostly didn't, just interface)
 #[cfg(test)]
@@ -519,7 +540,7 @@ mod tests {
                 ..Default::default()
             },
             Arc::new(InMemoryRiskStore),
-        );
+        ).await.unwrap();
 
         let context = TradeContext {
             user_id: "user1".to_string(),
@@ -531,14 +552,13 @@ mod tests {
             is_flagged: false,
         };
 
-        #[allow(deprecated)]
-        let result = manager.check_trade(&context).await;
+        let result = manager.check_and_reserve(&context).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_reserve_commit_flow() {
-        let manager = RiskManager::new();
+        let manager = RiskManager::new().await.unwrap();
 
         let context = TradeContext {
             user_id: "user1".to_string(),

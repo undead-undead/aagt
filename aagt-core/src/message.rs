@@ -26,6 +26,17 @@ pub enum Content {
     Parts(Vec<ContentPart>),
 }
 
+impl Role {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        }
+    }
+}
+
 impl Content {
     /// Create text content
     pub fn text(text: impl Into<String>) -> Self {

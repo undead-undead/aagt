@@ -25,6 +25,8 @@ pub struct AgentConfig {
     pub max_tokens: Option<u64>,
     /// Additional provider-specific parameters
     pub extra_params: Option<serde_json::Value>,
+    /// Policy for risky tools
+    pub tool_policy: RiskyToolPolicy,
 }
 
 impl Default for AgentConfig {
@@ -36,6 +38,37 @@ impl Default for AgentConfig {
             temperature: Some(0.7),
             max_tokens: Some(4096),
             extra_params: None,
+            tool_policy: RiskyToolPolicy::default(),
+        }
+    }
+}
+
+/// Policy for tool execution
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPolicy {
+    /// Allow execution without approval
+    Auto,
+    /// Require explicit approval
+    RequiresApproval,
+    /// Disable execution completely
+    Disabled,
+}
+
+/// Configuration for risky tool policies
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RiskyToolPolicy {
+    /// Default policy for all tools
+    pub default_policy: ToolPolicy,
+    /// Overrides for specific tools
+    pub overrides: std::collections::HashMap<String, ToolPolicy>,
+}
+
+impl Default for RiskyToolPolicy {
+    fn default() -> Self {
+        Self {
+            default_policy: ToolPolicy::Auto,
+            overrides: std::collections::HashMap::new(),
         }
     }
 }
@@ -48,6 +81,8 @@ pub enum AgentEvent {
     Thinking { prompt: String },
     /// Agent decided to use a tool
     ToolCall { tool: String, input: String },
+    /// Tool execution requires approval
+    ApprovalPending { tool: String, input: String },
     /// Tool execution finished
     ToolResult { tool: String, output: String },
     /// Agent generated a final response
@@ -234,6 +269,26 @@ impl<P: Provider> Agent<P> {
     /// Call a tool by name
     #[instrument(skip(self, arguments), fields(tool_name = %name))]
     pub async fn call_tool(&self, name: &str, arguments: &str) -> Result<String> {
+        // 1. Check Policy
+        let policy = self.config.tool_policy.overrides.get(name)
+            .unwrap_or(&self.config.tool_policy.default_policy);
+
+        match policy {
+            ToolPolicy::Disabled => {
+                 return Err(Error::tool_execution(name.to_string(), "Tool execution is disabled by policy".to_string()));
+            }
+            ToolPolicy::RequiresApproval => {
+                self.emit(AgentEvent::ApprovalPending { tool: name.to_string(), input: arguments.to_string() });
+                
+                // For now, in v1, we block/error if approval is needed because we don't have a resume mechanism yet.
+                // In a real TUI/GUI, this would pause or wait on a channel.
+                // Here we return a specific error that the caller can catch to prompt user?
+                // Actually, let's just error for now to be safe.
+                return Err(Error::ToolApprovalRequired { tool_name: name.to_string() });
+            }
+            ToolPolicy::Auto => {} // Proceed
+        }
+
         self.emit(AgentEvent::ToolCall { tool: name.to_string(), input: arguments.to_string() });
 
         let result = self.tools.call(name, arguments).await;
@@ -320,6 +375,12 @@ impl<P: Provider> AgentBuilder<P> {
     /// Add extra provider-specific parameters
     pub fn extra_params(mut self, params: serde_json::Value) -> Self {
         self.config.extra_params = Some(params);
+        self
+    }
+
+    /// Set tool policy
+    pub fn tool_policy(mut self, policy: RiskyToolPolicy) -> Self {
+        self.config.tool_policy = policy;
         self
     }
 

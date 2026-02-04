@@ -59,6 +59,8 @@ The project is structured as a Cargo workspace:
 - **Actors**: Components like `RiskManager` use an actor pattern (channels) to manage state without locks, ensuring high concurrency.
 - **Dynamic Strategies**: Strategies are defined as data (JSON), allowing dynamic reloading without recompilation.
 - **Explicit Tools**: Capabilities are explicit and self-describing via `Tool` traits.
+- **Risky Tool Policy**: Built-in "Approval Layer" to prevent dangerous tool execution without permission.
+- **Extensible**: Supports custom providers and complex tools like Semantic Web Browsers (ARIA-based).
 
 ---
 

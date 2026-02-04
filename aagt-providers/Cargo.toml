@@ -9,12 +9,14 @@ readme = "../README.md"
 
 [features]
 default = ["full"]
-full = ["openai", "anthropic", "gemini", "deepseek", "openrouter"]
+full = ["openai", "anthropic", "gemini", "deepseek", "openrouter", "moonshot"]
 openai = []
 anthropic = []
 gemini = []
 deepseek = ["openai"]
 openrouter = ["openai"]
+moonshot = ["openai"]
+
 
 [dependencies]
 aagt-core = { workspace = true }
