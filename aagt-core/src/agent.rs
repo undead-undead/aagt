@@ -27,6 +27,10 @@ pub struct AgentConfig {
     pub extra_params: Option<serde_json::Value>,
     /// Policy for risky tools
     pub tool_policy: RiskyToolPolicy,
+    /// Max history messages to send to LLM (Sliding window)
+    pub max_history_messages: usize,
+    /// Max characters allowed in tool output before truncation
+    pub max_tool_output_chars: usize,
 }
 
 impl Default for AgentConfig {
@@ -39,6 +43,8 @@ impl Default for AgentConfig {
             max_tokens: Some(4096),
             extra_params: None,
             tool_policy: RiskyToolPolicy::default(),
+            max_history_messages: 20,
+            max_tool_output_chars: 4096,
         }
     }
 }
@@ -227,7 +233,14 @@ impl<P: Provider> Agent<P> {
 
             info!("Agent starting chat completion (step {})", steps);
 
-            let stream = self.stream_chat(messages.clone()).await?;
+            // Context Window Management: Only send last N messages to respect quota
+            let context_messages = if messages.len() > self.config.max_history_messages {
+                messages[messages.len() - self.config.max_history_messages..].to_vec()
+            } else {
+                messages.clone()
+            };
+
+            let stream = self.stream_chat(context_messages).await?;
             
             let mut full_text = String::new();
             let mut tool_calls = Vec::new(); // (id, name, args)
@@ -419,9 +432,17 @@ impl<P: Provider> Agent<P> {
         let result = self.tools.call(name, arguments).await;
         
         match result {
-            Ok(ref output) => {
+            Ok(mut output) => {
+                // Quota Protection: Truncate tool output if too long
+                if output.len() > self.config.max_tool_output_chars {
+                    let original_len = output.len();
+                    output.truncate(self.config.max_tool_output_chars);
+                    output.push_str(&format!("\n\n(Note: Output truncated from {} to {} chars to save tokens)", 
+                        original_len, self.config.max_tool_output_chars));
+                }
+
                 self.emit(AgentEvent::ToolResult { tool: name.to_string(), output: output.clone() });
-                Ok(output.clone())
+                Ok(output)
             },
             Err(ref e) => {
                 self.emit(AgentEvent::Error { message: e.to_string() });
@@ -518,6 +539,18 @@ impl<P: Provider> AgentBuilder<P> {
         self.approval_handler = Some(Arc::new(handler));
         self
     }
+
+    /// Set max history messages (sliding window)
+    pub fn max_history_messages(mut self, count: usize) -> Self {
+        self.config.max_history_messages = count;
+        self
+    }
+
+    /// Set max tool output characters
+    pub fn max_tool_output_chars(mut self, count: usize) -> Self {
+        self.config.max_tool_output_chars = count;
+        self
+    }
     
     /// Set a notifier
     pub fn notifier(mut self, notifier: impl Notifier + 'static) -> Self {
@@ -550,6 +583,9 @@ impl<P: Provider> AgentBuilder<P> {
         // Validate configuration
         if self.config.model.is_empty() {
             return Err(Error::agent_config("model name cannot be empty"));
+        }
+        if self.config.max_history_messages == 0 {
+            return Err(Error::agent_config("max_history_messages must be at least 1"));
         }
 
         let (tx, _) = broadcast::channel(1000);
