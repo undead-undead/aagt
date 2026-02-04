@@ -82,6 +82,7 @@ AAGT implements a dual-layer memory architecture to balance performance and pers
 **1. Context Layer (Short-Term)**
 - **Storage**: RAM (`DashMap`) + **Disk Persistence** (JSON).
 - **Retention**: **Persistent** (Previously ephemeral).
+- **Undo**: Full support for `undo()` to roll back the last message (e.g., if AI hallucinated or user made a mistake).
 - **Purpose**: Maintains active conversation context. Optimized for high-frequency R/W.
 - **Why**: Ensures that if the agent restarts, the conversation history is immediately restored from disk.
 

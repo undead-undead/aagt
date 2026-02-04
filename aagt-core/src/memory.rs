@@ -26,6 +26,9 @@ pub trait Memory: Send + Sync {
 
     /// Clear memory for a user
     async fn clear(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<()>;
+
+    /// Undo last message
+    async fn undo(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<Option<Message>>;
 }
 
 /// Short-term memory - stores recent conversation history
@@ -224,8 +227,21 @@ impl Memory for ShortTermMemory {
         self.store.remove(&key);
         self.last_access.remove(&key);
         
-        // Sync to disk
         self.save().await
+    }
+
+    async fn undo(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<Option<Message>> {
+        let key = self.key(user_id, agent_id);
+        let msg = {
+            let mut entry = self.store.entry(key.clone()).or_default();
+            entry.pop_back()
+        };
+        
+        if msg.is_some() {
+            self.save().await?;
+        }
+        
+        Ok(msg)
     }
 }
 
@@ -524,7 +540,6 @@ impl Memory for LongTermMemory {
         
         let store = self.store.clone();
         
-        // Fix #1: Use delete_batch to avoid O(N^2) work (N snapshots for N items)
         let ids_to_delete = store.find_ids(move |idx| {
             if idx.get_metadata("user_id") != Some(&uid) { return false; }
             if let Some(ref target_aid) = aid {
@@ -534,10 +549,55 @@ impl Memory for LongTermMemory {
         }).await;
 
         if !ids_to_delete.is_empty() {
-            tracing::info!("Clearing memory for user {}{}: deleting {} entries in batch", user_id, agent_id.map_or("".to_string(), |a| format!(" (agent {})", a)), ids_to_delete.len());
             store.delete_batch(ids_to_delete).await?;
         }
         Ok(())
+    }
+
+    async fn undo(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<Option<Message>> {
+        let uid = user_id.to_string();
+        let aid = agent_id.map(|s| s.to_string());
+        
+        let matches = self.store.find_metadata(move |idx| {
+            if idx.get_metadata("user_id") != Some(&uid) { return false; }
+            if let Some(ref target_aid) = aid {
+                 if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
+            }
+            true
+        }).await;
+
+        if matches.is_empty() {
+            return Ok(None);
+        }
+
+        // Find the one with highest timestamp
+        let mut latest: Option<(String, i64)> = None;
+        for idx in matches {
+            if let Some(ts_str) = idx.get_metadata("timestamp") {
+                if let Ok(ts) = ts_str.parse::<i64>() {
+                    if latest.is_none() || ts > latest.as_ref().unwrap().1 {
+                        latest = Some((idx.id.clone(), ts));
+                    }
+                }
+            }
+        }
+
+        if let Some((id, _)) = latest {
+            if let Some(doc) = self.store.get(&id).await? {
+                if let Some(entry) = Self::doc_to_entry(doc) {
+                    let role = if entry.tags.contains(&"user".to_string()) { Role::User } else { Role::Assistant };
+                    let msg = Message {
+                        role,
+                        name: None,
+                        content: Content::Text(entry.content),
+                    };
+                    self.store.delete(&id).await?;
+                    return Ok(Some(msg));
+                }
+            }
+        }
+        
+        Ok(None)
     }
 }
 
@@ -562,6 +622,15 @@ impl MemoryManager {
             short_term: Arc::new(ShortTermMemory::new(short_term_max, short_term_users, short_term_path).await),
             long_term: Arc::new(LongTermMemory::new(long_term_max, path).await?),
         })
+    }
+
+    /// Undo last message in both memories
+    pub async fn undo(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<Option<Message>> {
+        // STM undo is primary for conversation flow
+        let stm_msg = self.short_term.undo(user_id, agent_id).await?;
+        // LTM undo keeps persistence in sync
+        let _ = self.long_term.undo(user_id, agent_id).await?;
+        Ok(stm_msg)
     }
 }
 
@@ -707,5 +776,25 @@ mod tests {
         assert!(!all.iter().any(|e| e.content == "Content 0"));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_memory_undo() {
+        let path = PathBuf::from("test_undo.jsonl");
+        if path.exists() { let _ = std::fs::remove_file(&path); }
+        let manager = MemoryManager::with_capacity(10, 10, 10, path.clone()).await.unwrap();
+
+        manager.short_term.store("u1", None, Message::user("Hello")).await.unwrap();
+        manager.short_term.store("u1", None, Message::assistant("Hi")).await.unwrap();
+
+        let undid = manager.undo("u1", None).await.unwrap();
+        assert_eq!(undid.unwrap().text(), "Hi");
+
+        let remaining = manager.short_term.retrieve("u1", None, 10).await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].text(), "Hello");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file("test_undo.stm.json");
     }
 }
