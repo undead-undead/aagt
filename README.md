@@ -4,7 +4,7 @@ A high-performance, production-ready Rust framework for building autonomous trad
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 AAGT is built on a modular "Brain-Body-Nervous System" architecture designed for high reliability and multi-tenant security.
 
@@ -30,11 +30,11 @@ AAGT is built on a modular "Brain-Body-Nervous System" architecture designed for
 
 ---
 
-## 📚 Documentation & API
+## Documentation & API
 
 AAGT follows a strictly decoupled design. For detailed information on specific interfaces, methods, and configurations, please refer to our comprehensive API documentation:
 
-👉 **[Download / View API Reference (API_REFERENCE.md)](./API_REFERENCE.md)**
+**[Download / View API Reference (API_REFERENCE.md)](./API_REFERENCE.md)**
 
 ### Key API Sections inside the Reference:
 - **[Core Agent API](./API_REFERENCE.md#1-core-module-aagt-core)**: Building and running agents.
@@ -44,7 +44,7 @@ AAGT follows a strictly decoupled design. For detailed information on specific i
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ```rust
 use aagt_core::prelude::*;
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
 
 ---
 
-## ☕ Support the Project
+## Support the Project
 
 If you find AAGT useful, consider supporting the developers:
 
@@ -84,7 +84,7 @@ If you find AAGT useful, consider supporting the developers:
 
 ---
 
-## ⚖️ License
+## License
 MIT / Apache 2.0
 
 ---
