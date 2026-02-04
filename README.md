@@ -89,4 +89,4 @@ MIT / Apache 2.0
 
 ---
 
-**Built with Rust | Production-Ready v0.1.2**
+**Built with Rust | Production-Ready v0.1.3**
