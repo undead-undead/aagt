@@ -52,5 +52,7 @@ impl Provider for Moonshot {
 
 /// Common model constants
 pub const MOONSHOT_V1_8K: &str = "moonshot-v1-8k";
+/// Moonshot v1 32k
 pub const MOONSHOT_V1_32K: &str = "moonshot-v1-32k";
+/// Moonshot v1 128k
 pub const MOONSHOT_V1_128K: &str = "moonshot-v1-128k";

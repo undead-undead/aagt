@@ -2,6 +2,7 @@ use aagt_core::prelude::*;
 use aagt_core::risk::{RiskManager, DeadManSwitch, TradeContext};
 use std::sync::Arc;
 use std::path::PathBuf;
+use rust_decimal_macros::dec;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,9 +20,9 @@ async fn main() -> Result<()> {
         user_id: "test".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 100.0,
-        expected_slippage: 0.1,
-        liquidity_usd: Some(500000.0),
+        amount_usd: dec!(100.0),
+        expected_slippage: dec!(0.1),
+        liquidity_usd: Some(dec!(500000.0)),
         is_flagged: false,
     };
     

@@ -4,7 +4,7 @@ use aagt_core::message::Message;
 #[tokio::test]
 async fn verify_short_term_memory_limits() {
     // Create memory with limit of 3 users
-    let memory = ShortTermMemory::new(10, 3);
+    let memory = ShortTermMemory::new(10, 3, "test_limits.json").await;
     
     // Add 3 users
     memory.store("user1", None, Message::user("Hi")).await.unwrap();

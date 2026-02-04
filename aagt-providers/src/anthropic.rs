@@ -1,6 +1,6 @@
 //! Anthropic (Claude) provider implementation
 
-use std::pin::Pin;
+
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -121,7 +121,7 @@ struct StreamEvent {
 #[derive(Debug, Deserialize)]
 struct StreamDelta {
     #[serde(rename = "type")]
-    delta_type: Option<String>,
+    _delta_type: Option<String>,
     text: Option<String>,
     partial_json: Option<String>,
 }
@@ -362,9 +362,13 @@ where
 
 /// Common model constants
 pub const CLAUDE_3_5_SONNET: &str = "claude-3-5-sonnet-20241022";
+/// Claude 3.5 Haiku
 pub const CLAUDE_3_5_HAIKU: &str = "claude-3-5-haiku-20241022";
+/// Claude 3 Opus
 pub const CLAUDE_3_OPUS: &str = "claude-3-opus-20240229";
+/// Claude 3 Sonnet
 pub const CLAUDE_3_SONNET: &str = "claude-3-sonnet-20240229";
+/// Claude 3 Haiku
 pub const CLAUDE_3_HAIKU: &str = "claude-3-haiku-20240307";
 
 #[cfg(test)]

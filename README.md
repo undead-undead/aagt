@@ -58,6 +58,29 @@ LongTermMemory: FileStore (JSONL) or Qdrant (vectors)
 - **Streamable**: Read line-by-line, minimal RAM
 - **Human-Readable**: Easy debugging and data recovery
 
+### Memory System Detail
+
+AAGT implements a dual-layer memory architecture to balance performance and persistence:
+
+**1. Context Layer (Short-Term)**
+- **Storage**: RAM (`DashMap`)
+- **Retention**: Ephemeral (lost on restart)
+- **Purpose**: Maintains active conversation context. Optimized for high-frequency R/W.
+- **Why**: Keep trade execution fast and context window clean.
+
+**2. Knowledge Layer (Long-Term)**
+- **Storage**: Disk (`data/memory.jsonl`)
+- **Retention**: Persistent
+- **Purpose**: Stores facts, user preferences, and *archived* trade history.
+- **Safety**: Uses **Structured Isolation** to prevent hallucinations.
+
+#### Structured Isolation Strategy
+To prevent the LLM from hallucinating based on historical prices (e.g., confusing 2024 BTC price with today's), AAGT strictly separates archival data:
+
+1.  **Tagging**: Historical records (e.g., trades) are stored with specific tags like `["archived", "do_not_rag"]` and structured JSON content.
+2.  **Filtering**: The default retrieval engine **automatically excludes** any record with these tags.
+3.  **Scoped Access**: Historical data is only accessible when explicitly requested via specialized tools/intents, ensuring "Ordinary Chat" never sees conflicting historical data.
+
 ### 3. Kernel + Shell Architecture
 
 ```

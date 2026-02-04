@@ -6,6 +6,7 @@ use aagt_core::store::file::{FileStore, FileStoreConfig};
 use aagt_core::rag::VectorStore;
 use aagt_core::prelude::*;
 use std::path::PathBuf;
+use rust_decimal_macros::dec;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,9 +18,9 @@ async fn main() -> Result<()> {
         user_id: "user1".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 100.0,
-        expected_slippage: 0.1,
-        liquidity_usd: Some(1_000_000.0),
+        amount_usd: dec!(100.0),
+        expected_slippage: dec!(0.1),
+        liquidity_usd: Some(dec!(1000000.0)),
         is_flagged: false,
     };
     
@@ -71,7 +72,7 @@ async fn main() -> Result<()> {
     
     let store = Arc::new(FileRiskStore::new(risk_file.clone()));
     let config = RiskConfig {
-        max_daily_volume_usd: 1000.0,
+        max_daily_volume_usd: dec!(1000.0),
         ..Default::default()
     };
     
@@ -82,23 +83,23 @@ async fn main() -> Result<()> {
         user_id: "shared_user".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 600.0,
-        expected_slippage: 0.1,
-        liquidity_usd: Some(1_000_000.0),
+        amount_usd: dec!(600.0),
+        expected_slippage: dec!(0.1),
+        liquidity_usd: Some(dec!(1000000.0)),
         is_flagged: false,
     };
 
     manager1.check_and_reserve(&ctx1).await?;
-    manager1.commit_trade("shared_user", 600.0).await?;
+    manager1.commit_trade("shared_user", dec!(600.0)).await?;
     println!("Manager 1 committed $600");
 
     let ctx2 = TradeContext {
         user_id: "shared_user".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 500.0, // This should put it over the $1000 limit
-        expected_slippage: 0.1,
-        liquidity_usd: Some(1_000_000.0),
+        amount_usd: dec!(500.0), // This should put it over the $1000 limit
+        expected_slippage: dec!(0.1),
+        liquidity_usd: Some(dec!(1000000.0)),
         is_flagged: false,
     };
 

@@ -11,6 +11,7 @@ use aagt_core::memory::MemoryEntry;
 use aagt_core::risk::InMemoryRiskStore;
 use std::sync::Arc;
 use std::path::PathBuf;
+use rust_decimal_macros::dec;
 use anyhow::Result;
 
 #[tokio::main]
@@ -22,7 +23,7 @@ async fn main() -> Result<()> {
     //  1. Setup Memory with Background Maintenance
     println!("📝 Setting up memory system with background maintenance...");
     
-    let short_term = Arc::new(ShortTermMemory::default_capacity());
+    let short_term = Arc::new(ShortTermMemory::new(100, 10, "data/demo_stm.json").await);
     let long_term = Arc::new(
         LongTermMemory::new(1000, PathBuf::from("data/demo_memory.jsonl")).await?
     );
@@ -41,10 +42,10 @@ async fn main() -> Result<()> {
     // 2. Configure Risk Management
     println!("\n🛡️  Initializing risk management...");
     let risk_config = RiskConfig {
-        max_single_trade_usd: 1000.0,
-        max_daily_volume_usd: 5000.0,
-        max_slippage_percent: 2.0,
-        min_liquidity_usd: 100_000.0,
+        max_single_trade_usd: dec!(1000.0),
+        max_daily_volume_usd: dec!(5000.0),
+        max_slippage_percent: dec!(2.0),
+        min_liquidity_usd: dec!(100000.0),
         enable_rug_detection: true,
         trade_cooldown_secs: 10,
     };
@@ -110,9 +111,9 @@ async fn main() -> Result<()> {
         user_id: "demo_user".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 500.0,
-        expected_slippage: 0.5,
-        liquidity_usd: Some(1_000_000.0),
+        amount_usd: dec!(500.0),
+        expected_slippage: dec!(0.5),
+        liquidity_usd: Some(dec!(1000000.0)),
         is_flagged: false,
     };
 
@@ -128,9 +129,9 @@ async fn main() -> Result<()> {
         user_id: "demo_user".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 2000.0, // Exceeds limit
-        expected_slippage: 0.5,
-        liquidity_usd: Some(1_000_000.0),
+        amount_usd: dec!(2000.0), // Exceeds limit
+        expected_slippage: dec!(0.5),
+        liquidity_usd: Some(dec!(1000000.0)),
         is_flagged: false,
     };
 

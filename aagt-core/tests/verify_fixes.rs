@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use std::collections::HashMap;
 
+use rust_decimal_macros::dec;
+
 #[tokio::test]
 async fn verify_risk_persistence_fix() {
     let path = PathBuf::from("test_risk_persist.json");
@@ -17,7 +19,7 @@ async fn verify_risk_persistence_fix() {
     let manager_a = RiskManager::with_config(config.clone(), store.clone()).await.expect("Failed to create manager A");
     
     // 2. Commit a trade
-    manager_a.commit_trade("user_verify", 5000.0).await.expect("Commit failed");
+    manager_a.commit_trade("user_verify", dec!(5000.0)).await.expect("Commit failed");
     
     // 3. Create Manager B (simulate restart) - Should load state automatically
     let manager_b = RiskManager::with_config(config.clone(), store.clone()).await.expect("Failed to create manager B");
@@ -25,7 +27,7 @@ async fn verify_risk_persistence_fix() {
     // 4. Check remaining limit (Should be 50k - 5k = 45k)
     let remaining = manager_b.remaining_daily_limit("user_verify").await;
     
-    assert_eq!(remaining, 45_000.0, "Risk state was not loaded correctly on restart!");
+    assert_eq!(remaining, dec!(45000.0), "Risk state was not loaded correctly on restart!");
     
     // Cleanup
     if path.exists() { std::fs::remove_file(&path).unwrap(); }
@@ -49,7 +51,7 @@ async fn verify_filestore_metadata_optimization() {
     metadata.insert("page_content".to_string(), huge_content.clone());
     metadata.insert("safe_key".to_string(), "safe_value".to_string());
     
-    let id = store.store("content", metadata).await.expect("Store failed");
+    let _id = store.store("content", metadata).await.expect("Store failed");
 
     // 2. Check Index (via search finding it)
     let results = store.search("content", 1).await.expect("Search failed");

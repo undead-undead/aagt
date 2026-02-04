@@ -11,6 +11,8 @@ use aagt_core::prelude::*;
 use aagt_core::risk::InMemoryRiskStore;
 use aagt_core::strategy::{FileStrategyStore, PriceDirection, NotifyChannel, StrategyStore};
 use std::sync::Arc;
+use rust_decimal_macros::dec;
+use rust_decimal::Decimal;
 use anyhow::Result;
 
 #[tokio::main]
@@ -23,10 +25,10 @@ async fn main() -> Result<()> {
     println!("🛡️  Setting up custom risk checks...");
     
     let risk_config = RiskConfig {
-        max_single_trade_usd: 10_000.0,
-        max_daily_volume_usd: 50_000.0,
-        max_slippage_percent: 2.0,
-        min_liquidity_usd: 500_000.0,
+        max_single_trade_usd: dec!(10000.0),
+        max_daily_volume_usd: dec!(50000.0),
+        max_slippage_percent: dec!(2.0),
+        min_liquidity_usd: dec!(500000.0),
         enable_rug_detection: true,
         trade_cooldown_secs: 30,
     };
@@ -40,9 +42,9 @@ async fn main() -> Result<()> {
     
     // Use RiskCheckBuilder for composable checks
     let custom_checks = RiskCheckBuilder::new()
-        .max_trade_amount(5_000.0)  // More conservative than config
-        .max_slippage(1.5)           // Stricter slippage
-        .min_liquidity(1_000_000.0)  // Higher liquidity requirement
+        .max_trade_amount(dec!(5000.0))  // More conservative than config
+        .max_slippage(dec!(1.5))           // Stricter slippage
+        .min_liquidity(dec!(1000000.0))  // Higher liquidity requirement
         .token_security(vec![
             "SCAM1".to_string(),
             "RUG2".to_string(),
@@ -70,7 +72,7 @@ async fn main() -> Result<()> {
         description: Some("Low-risk swing trading strategy".to_string()),
         condition: Condition::PriceChange {
             token: "SOL".to_string(),
-            percent: 5.0,
+            percent: dec!(5.0),
             direction: PriceDirection::Any,
         },
         actions: vec![
@@ -97,7 +99,7 @@ async fn main() -> Result<()> {
     // 3. Background Maintenance
     println!("\n🧹 Starting background maintenance...");
     
-    let short_term = Arc::new(ShortTermMemory::default_capacity());
+    let short_term = Arc::new(ShortTermMemory::new(100, 10, "data/demo_stm.json").await);
     
     let mut maintenance = MaintenanceManager::new();
     let config = MaintenanceConfig {
@@ -117,9 +119,9 @@ async fn main() -> Result<()> {
         user_id: "demo_user".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 3_000.0,
-        expected_slippage: 1.0,
-        liquidity_usd: Some(2_000_000.0),
+        amount_usd: dec!(3000.0),
+        expected_slippage: dec!(1.0),
+        liquidity_usd: Some(dec!(2000000.0)),
         is_flagged: false,
     };
     
@@ -136,9 +138,9 @@ async fn main() -> Result<()> {
         user_id: "demo_user".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 7_000.0,  // Exceeds custom limit
-        expected_slippage: 1.0,
-        liquidity_usd: Some(2_000_000.0),
+        amount_usd: dec!(7000.0),  // Exceeds custom limit
+        expected_slippage: dec!(1.0),
+        liquidity_usd: Some(dec!(2000000.0)),
         is_flagged: false,
     };
     
@@ -152,9 +154,9 @@ async fn main() -> Result<()> {
         user_id: "demo_user2".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 1_000.0,
-        expected_slippage: 3.0,  // Exceeds 1.5% limit
-        liquidity_usd: Some(2_000_000.0),
+        amount_usd: dec!(1000.0),
+        expected_slippage: dec!(3.0),  // Exceeds 1.5% limit
+        liquidity_usd: Some(dec!(2000000.0)),
         is_flagged: false,
     };
     
@@ -168,9 +170,9 @@ async fn main() -> Result<()> {
         user_id: "demo_user3".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SCAM1".to_string(),  // Blacklisted
-        amount_usd: 100.0,
-        expected_slippage: 0.5,
-        liquidity_usd: Some(2_000_000.0),
+        amount_usd: dec!(100.0),
+        expected_slippage: dec!(0.5),
+        liquidity_usd: Some(dec!(2000000.0)),
         is_flagged: false,
     };
     

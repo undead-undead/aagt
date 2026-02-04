@@ -1,6 +1,6 @@
 //! Google Gemini provider implementation
 
-use std::pin::Pin;
+
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -378,9 +378,13 @@ where
 }
 
 /// Common model constants
+/// Gemini 2.0 Flash
 pub const GEMINI_2_0_FLASH: &str = "gemini-2.0-flash-exp";
+/// Gemini 2.0 Flash Thinking
 pub const GEMINI_2_0_FLASH_THINKING: &str = "gemini-2.0-flash-thinking-exp";
+/// Gemini 1.5 Pro
 pub const GEMINI_1_5_PRO: &str = "gemini-1.5-pro";
+/// Gemini 1.5 Flash
 pub const GEMINI_1_5_FLASH: &str = "gemini-1.5-flash";
 
 #[cfg(test)]

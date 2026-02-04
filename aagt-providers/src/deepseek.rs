@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::{Error, Result, Message, StreamingResponse, ToolDefinition, Provider, HttpConfig};
+use crate::{Error, Result, Message, StreamingResponse, ToolDefinition, Provider};
 use crate::openai::OpenAI;
 
 /// DeepSeek API client (OpenAI compatible)
@@ -48,5 +48,7 @@ impl Provider for DeepSeek {
 }
 
 /// Common model constants
+/// DeepSeek Chat
 pub const DEEPSEEK_CHAT: &str = "deepseek-chat";
+/// DeepSeek Coder
 pub const DEEPSEEK_CODER: &str = "deepseek-coder";

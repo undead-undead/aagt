@@ -22,7 +22,7 @@ pub mod maintenance;
 pub mod memory;
 pub mod message;
 pub mod multi_agent;
-pub mod notifications;
+pub mod notification;
 pub mod pipeline;
 pub mod provider;
 pub mod rag;
@@ -42,6 +42,7 @@ pub mod prelude {
     pub use crate::memory::{LongTermMemory, Memory, MemoryManager, ShortTermMemory};
     pub use crate::message::{Content, Message, Role, ToolCall};
     pub use crate::multi_agent::{AgentRole, Coordinator, MultiAgent};
+    pub use crate::notification::{Notifier, NotifyChannel};
     pub use crate::provider::Provider;
     pub use crate::risk::{
         RiskCheck, RiskCheckBuilder, RiskCheckResult, RiskConfig, RiskManager, TradeContext,

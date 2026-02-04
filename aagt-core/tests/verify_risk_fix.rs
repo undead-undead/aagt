@@ -1,14 +1,16 @@
 use aagt_core::risk::*;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use std::sync::Arc;
 use std::collections::HashMap;
+
+use rust_decimal_macros::dec;
 
 #[tokio::test]
 async fn verify_risk_daily_reset_preserves_pending() {
     // 1. Setup RiskManager with a mock store
     let config = RiskConfig {
-        max_daily_volume_usd: 1000.0,
-        min_liquidity_usd: 1000.0, // Match test data (which is 10000.0)
+        max_daily_volume_usd: dec!(1000.0),
+        min_liquidity_usd: dec!(1000.0), // Match test data (which is 10000.0)
         ..Default::default()
     };
     
@@ -38,8 +40,8 @@ async fn verify_risk_daily_reset_preserves_pending() {
     let yesterday = Utc::now() - Duration::days(1);
     
     state.insert("user1".to_string(), UserState {
-        daily_volume_usd: 500.0, // Should be cleared
-        pending_volume_usd: 100.0, // Should NOT be cleared
+        daily_volume_usd: dec!(500.0), // Should be cleared
+        pending_volume_usd: dec!(100.0), // Should NOT be cleared
         last_trade: Some(yesterday),
         volume_reset: yesterday,
     });
@@ -54,9 +56,9 @@ async fn verify_risk_daily_reset_preserves_pending() {
         user_id: "user1".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 50.0,
-        expected_slippage: 0.1,
-        liquidity_usd: Some(10000.0),
+        amount_usd: dec!(50.0),
+        expected_slippage: dec!(0.1),
+        liquidity_usd: Some(dec!(10000.0)),
         is_flagged: false,
     };
     
@@ -78,5 +80,5 @@ async fn verify_risk_daily_reset_preserves_pending() {
     let remaining = manager.remaining_daily_limit("user1").await;
     println!("Remaining Limit: {}", remaining);
     
-    assert_eq!(remaining, 850.0, "Pending volume incorrectly cleared on daily reset!");
+    assert_eq!(remaining, dec!(850.0), "Pending volume incorrectly cleared on daily reset!");
 }

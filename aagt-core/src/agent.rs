@@ -91,13 +91,78 @@ pub enum AgentEvent {
     Error { message: String },
 }
 
+/// Handler for user approvals
+#[async_trait::async_trait]
+pub trait ApprovalHandler: Send + Sync {
+    /// Request approval for a tool call
+    async fn approve(&self, tool_name: &str, arguments: &str) -> Result<bool>;
+}
+
+/// A default approval handler that rejects all
+pub struct RejectAllApprovalHandler;
+
+#[async_trait::async_trait]
+impl ApprovalHandler for RejectAllApprovalHandler {
+    async fn approve(&self, _tool: &str, _args: &str) -> Result<bool> {
+        Ok(false)
+    }
+}
+
+/// Request sent to the channel handler
+#[derive(Debug)]
+pub struct ApprovalRequest {
+    /// Unique ID for this request
+    pub id: String,
+    /// Tool name
+    pub tool_name: String,
+    /// Tool arguments
+    pub arguments: String,
+    /// Responder channel
+    pub responder: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// A handler that sends approval requests via a channel
+pub struct ChannelApprovalHandler {
+    sender: tokio::sync::mpsc::Sender<ApprovalRequest>,
+}
+
+impl ChannelApprovalHandler {
+    /// Create a new channel handler
+    pub fn new(sender: tokio::sync::mpsc::Sender<ApprovalRequest>) -> Self {
+        Self { sender }
+    }
+}
+
+#[async_trait::async_trait]
+impl ApprovalHandler for ChannelApprovalHandler {
+    async fn approve(&self, tool_name: &str, arguments: &str) -> Result<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        
+        let request = ApprovalRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            tool_name: tool_name.to_string(),
+            arguments: arguments.to_string(),
+            responder: tx,
+        };
+
+        self.sender.send(request).await
+            .map_err(|_| Error::Internal("Approval channel closed".to_string()))?;
+
+        // Wait for response
+        rx.await.map_err(|_| Error::Internal("Approval responder dropped".to_string()))
+    }
+}
+
+use crate::notification::{Notifier, NotifyChannel};
+
 /// The main Agent struct
 pub struct Agent<P: Provider> {
     provider: Arc<P>,
     tools: ToolSet,
     config: AgentConfig,
-    /// Event bus for observability
     events: broadcast::Sender<AgentEvent>,
+    approval_handler: Arc<dyn ApprovalHandler>,
+    notifier: Option<Arc<dyn Notifier>>,
 }
 
 impl<P: Provider> Agent<P> {
@@ -114,8 +179,18 @@ impl<P: Provider> Agent<P> {
     /// Helper to emit events safely
     fn emit(&self, event: AgentEvent) {
         if let Err(e) = self.events.send(event) {
-            // Log warning if no receivers (not critical, but good to know)
             tracing::debug!("Failed to emit event (no receivers): {}", e);
+        }
+    }
+    
+    /// Send a notification via the configured notifier
+    pub async fn notify(&self, channel: NotifyChannel, message: &str) -> Result<()> {
+        if let Some(notifier) = &self.notifier {
+             notifier.notify(channel, message).await
+        } else {
+             // If no notifier configured, log warning but don't fail hard
+             tracing::warn!("Agent tried to notify but no notifier is configured: {}", message);
+             Ok(())
         }
     }
 
@@ -152,10 +227,10 @@ impl<P: Provider> Agent<P> {
 
             info!("Agent starting chat completion (step {})", steps);
 
-            let mut stream = self.stream_chat(messages.clone()).await?;
+            let stream = self.stream_chat(messages.clone()).await?;
             
             let mut full_text = String::new();
-            let mut tool_calls = Vec::new();
+            let mut tool_calls = Vec::new(); // (id, name, args)
 
             let mut stream_inner = stream.into_inner();
 
@@ -170,14 +245,9 @@ impl<P: Provider> Agent<P> {
                         tool_calls.push((id, name, arguments));
                     }
                      crate::streaming::StreamingChoice::ParallelToolCalls(map) => {
-                         // Flatten parallel calls
-                         // Map is index -> ToolCall. Order by index.
                          let mut sorted: Vec<_> = map.into_iter().collect();
                          sorted.sort_by_key(|(k,_)| *k);
                          for (_, tc) in sorted {
-                             // tc.arguments is passed as Value in streaming choice from OpenAI
-                             // But wait, StreamingChoice definition in streaming.rs might differ from my implementation in openai.rs
-                             // Let's assume openai.rs implementation (Value) is correct and reflects StreamingChoice
                              tool_calls.push((tc.id, tc.name, tc.arguments));
                          }
                     }
@@ -211,10 +281,10 @@ impl<P: Provider> Agent<P> {
             });
 
             // 2. Execute Tools (Parallel)
-            // Fix C1: Avoid moving self in async closures
             let tools = &self.tools;
             let policy = &self.config.tool_policy;
             let events = &self.events;
+            let approval_handler = &self.approval_handler;
             
             let mut futures = Vec::new();
             
@@ -237,7 +307,24 @@ impl<P: Provider> Agent<P> {
                                 tool: name_clone.clone(), 
                                 input: args_str.clone() 
                             });
-                            Err(Error::ToolApprovalRequired { tool_name: name_clone.clone() })
+                            
+                            // Ask approval handler
+                            match approval_handler.approve(&name_clone, &args_str).await {
+                                Ok(true) => {
+                                    // Approved! Proceed to auto
+                                    let _ = events.send(AgentEvent::ToolCall { 
+                                        tool: name_clone.clone(), 
+                                        input: args_str.clone() 
+                                    });
+                                    tools.call(&name_clone, &args_str).await
+                                }
+                                Ok(false) => {
+                                    Err(Error::ToolApprovalRequired { tool_name: name_clone.clone() })
+                                }
+                                Err(e) => {
+                                    Err(Error::tool_execution(name_clone.clone(), format!("Approval check failed: {}", e)))
+                                }
+                            }
                         }
                         ToolPolicy::Auto => {
                             let _ = events.send(AgentEvent::ToolCall { 
@@ -269,11 +356,10 @@ impl<P: Provider> Agent<P> {
             let results = futures::future::join_all(futures).await;
 
             // 3. Append Tool Results to history
-            // Each result is a separate Tool message
             for (id, output, name) in results {
                  messages.push(Message {
                     role: Role::Tool,
-                    name: None, // Optional name on Message, but we can set it in Content if needed
+                    name: None,
                     content: Content::Parts(vec![crate::message::ContentPart::ToolResult {
                         tool_call_id: id,
                         content: output,
@@ -281,8 +367,6 @@ impl<P: Provider> Agent<P> {
                     }]),
                 });
             }
-            
-            // Loop continues to generate response based on tool results
         }
     }
 
@@ -307,7 +391,7 @@ impl<P: Provider> Agent<P> {
             .await
     }
 
-    /// Call a tool by name
+    /// Call a tool by name (Direct call helper)
     #[instrument(skip(self, arguments), fields(tool_name = %name))]
     pub async fn call_tool(&self, name: &str, arguments: &str) -> Result<String> {
         // 1. Check Policy
@@ -321,11 +405,11 @@ impl<P: Provider> Agent<P> {
             ToolPolicy::RequiresApproval => {
                 self.emit(AgentEvent::ApprovalPending { tool: name.to_string(), input: arguments.to_string() });
                 
-                // For now, in v1, we block/error if approval is needed because we don't have a resume mechanism yet.
-                // In a real TUI/GUI, this would pause or wait on a channel.
-                // Here we return a specific error that the caller can catch to prompt user?
-                // Actually, let's just error for now to be safe.
-                return Err(Error::ToolApprovalRequired { tool_name: name.to_string() });
+                match self.approval_handler.approve(name, arguments).await {
+                    Ok(true) => {}, // Proceed
+                    Ok(false) => return Err(Error::ToolApprovalRequired { tool_name: name.to_string() }),
+                    Err(e) => return Err(Error::tool_execution(name.to_string(), format!("Approval check failed: {}", e)))
+                }
             }
             ToolPolicy::Auto => {} // Proceed
         }
@@ -372,6 +456,8 @@ pub struct AgentBuilder<P: Provider> {
     provider: P,
     tools: ToolSet,
     config: AgentConfig,
+    approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    notifier: Option<Arc<dyn Notifier>>,
 }
 
 impl<P: Provider> AgentBuilder<P> {
@@ -381,6 +467,8 @@ impl<P: Provider> AgentBuilder<P> {
             provider,
             tools: ToolSet::new(),
             config: AgentConfig::default(),
+            approval_handler: None,
+            notifier: None,
         }
     }
 
@@ -425,6 +513,18 @@ impl<P: Provider> AgentBuilder<P> {
         self
     }
 
+    /// Set external approval handler
+    pub fn approval_handler(mut self, handler: impl ApprovalHandler + 'static) -> Self {
+        self.approval_handler = Some(Arc::new(handler));
+        self
+    }
+    
+    /// Set a notifier
+    pub fn notifier(mut self, notifier: impl Notifier + 'static) -> Self {
+        self.notifier = Some(Arc::new(notifier));
+        self
+    }
+
     /// Add a tool
     pub fn tool<T: Tool + 'static>(mut self, tool: T) -> Self {
         self.tools.add(tool);
@@ -452,7 +552,6 @@ impl<P: Provider> AgentBuilder<P> {
             return Err(Error::agent_config("model name cannot be empty"));
         }
 
-        // Fix M4: Increase event channel capacity to avoid message loss in high-frequency scenarios
         let (tx, _) = broadcast::channel(1000);
 
         Ok(Agent {
@@ -460,6 +559,8 @@ impl<P: Provider> AgentBuilder<P> {
             tools: self.tools,
             config: self.config,
             events: tx,
+            approval_handler: self.approval_handler.unwrap_or_else(|| Arc::new(RejectAllApprovalHandler)),
+            notifier: self.notifier,
         })
     }
 }

@@ -1,15 +1,17 @@
 //! Enhanced Risk Check system with composable checks
 
 use super::{RiskCheck, RiskCheckResult, TradeContext};
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::sync::Arc;
 
 /// Maximum trade amount check
 pub struct MaxTradeAmountCheck {
-    max_amount: f64,
+    max_amount: Decimal,
 }
 
 impl MaxTradeAmountCheck {
-    pub fn new(max_amount: f64) -> Self {
+    pub fn new(max_amount: Decimal) -> Self {
         Self { max_amount }
     }
 }
@@ -35,11 +37,11 @@ impl RiskCheck for MaxTradeAmountCheck {
 
 /// Slippage tolerance check
 pub struct SlippageCheck {
-    max_slippage_percent: f64,
+    max_slippage_percent: Decimal,
 }
 
 impl SlippageCheck {
-    pub fn new(max_slippage_percent: f64) -> Self {
+    pub fn new(max_slippage_percent: Decimal) -> Self {
         Self {
             max_slippage_percent,
         }
@@ -67,11 +69,11 @@ impl RiskCheck for SlippageCheck {
 
 /// Liquidity check
 pub struct LiquidityCheck {
-    min_liquidity: f64,
+    min_liquidity: Decimal,
 }
 
 impl LiquidityCheck {
-    pub fn new(min_liquidity: f64) -> Self {
+    pub fn new(min_liquidity: Decimal) -> Self {
         Self { min_liquidity }
     }
 }
@@ -170,15 +172,15 @@ impl RiskCheckBuilder {
         self
     }
 
-    pub fn max_trade_amount(self, max: f64) -> Self {
+    pub fn max_trade_amount(self, max: Decimal) -> Self {
         self.add_check(Arc::new(MaxTradeAmountCheck::new(max)))
     }
 
-    pub fn max_slippage(self, max_percent: f64) -> Self {
+    pub fn max_slippage(self, max_percent: Decimal) -> Self {
         self.add_check(Arc::new(SlippageCheck::new(max_percent)))
     }
 
-    pub fn min_liquidity(self, min: f64) -> Self {
+    pub fn min_liquidity(self, min: Decimal) -> Self {
         self.add_check(Arc::new(LiquidityCheck::new(min)))
     }
 
@@ -208,9 +210,9 @@ mod tests {
     #[test]
     fn test_risk_check_builder() {
         let checks = RiskCheckBuilder::new()
-            .max_trade_amount(1000.0)
-            .max_slippage(2.0)
-            .min_liquidity(100_000.0)
+            .max_trade_amount(dec!(1000.0))
+            .max_slippage(dec!(2.0))
+            .min_liquidity(dec!(100000.0))
             .build();
 
         assert_eq!(checks.len(), 3);
@@ -219,9 +221,9 @@ mod tests {
             user_id: "test".to_string(),
             from_token: "USDC".to_string(),
             to_token: "SOL".to_string(),
-            amount_usd: 500.0,
-            expected_slippage: 1.0,
-            liquidity_usd: Some(200_000.0),
+            amount_usd: dec!(500.0),
+            expected_slippage: dec!(1.0),
+            liquidity_usd: Some(dec!(200000.0)),
             is_flagged: false,
         };
 
@@ -233,24 +235,24 @@ mod tests {
     #[test]
     fn test_composite_check() {
         let composite = RiskCheckBuilder::new()
-            .max_trade_amount(1000.0)
-            .max_slippage(2.0)
+            .max_trade_amount(dec!(1000.0))
+            .max_slippage(dec!(2.0))
             .build_composite("test_composite".to_string());
 
         let good_context = TradeContext {
             user_id: "test".to_string(),
             from_token: "USDC".to_string(),
             to_token: "SOL".to_string(),
-            amount_usd: 500.0,
-            expected_slippage: 1.0,
-            liquidity_usd: Some(200_000.0),
+            amount_usd: dec!(500.0),
+            expected_slippage: dec!(1.0),
+            liquidity_usd: Some(dec!(200000.0)),
             is_flagged: false,
         };
 
         assert!(composite.check(&good_context).is_approved());
 
         let bad_context = TradeContext {
-            amount_usd: 2000.0,
+            amount_usd: dec!(2000.0),
             ..good_context
         };
 

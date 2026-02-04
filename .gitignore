@@ -19,3 +19,10 @@ Thumbs.db
 .env
 .env.local
 logs/
+
+# Data and Persistence
+*.json
+*.jsonl
+*.index
+data/
+!Cargo.json # If any config json exists, but usually not

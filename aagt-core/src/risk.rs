@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 use crate::error::{Error, Result};
 
@@ -125,13 +127,13 @@ impl RiskCheckResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskConfig {
     /// Maximum single trade amount in USD
-    pub max_single_trade_usd: f64,
-    /// Maximum daily trade volume in USD
-    pub max_daily_volume_usd: f64,
+    pub max_single_trade_usd: Decimal,
+    /// Maximum daily volume usd
+    pub max_daily_volume_usd: Decimal,
     /// Maximum slippage percentage allowed
-    pub max_slippage_percent: f64,
+    pub max_slippage_percent: Decimal,
     /// Minimum liquidity required in USD
-    pub min_liquidity_usd: f64,
+    pub min_liquidity_usd: Decimal,
     /// Enable rug pull detection
     pub enable_rug_detection: bool,
     /// Cooldown between trades in seconds
@@ -141,10 +143,10 @@ pub struct RiskConfig {
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
-            max_single_trade_usd: 10_000.0,
-            max_daily_volume_usd: 50_000.0,
-            max_slippage_percent: 5.0,
-            min_liquidity_usd: 100_000.0,
+            max_single_trade_usd: dec!(10000.0),
+            max_daily_volume_usd: dec!(50000.0),
+            max_slippage_percent: dec!(5.0),
+            min_liquidity_usd: dec!(100000.0),
             enable_rug_detection: true,
             trade_cooldown_secs: 5,
         }
@@ -170,11 +172,11 @@ pub struct TradeContext {
     /// Token being bought
     pub to_token: String,
     /// Amount in USD
-    pub amount_usd: f64,
+    pub amount_usd: Decimal,
     /// Expected slippage
-    pub expected_slippage: f64,
+    pub expected_slippage: Decimal,
     /// Token liquidity in USD
-    pub liquidity_usd: Option<f64>,
+    pub liquidity_usd: Option<Decimal>,
     /// Is this token flagged as risky
     pub is_flagged: bool,
 }
@@ -182,10 +184,9 @@ pub struct TradeContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserState {
     /// Daily volume traded (committed)
-    pub daily_volume_usd: f64,
+    pub daily_volume_usd: Decimal,
     /// Volume currently reserved by pending trades (not yet committed)
-    // Fix: Remove #[serde(skip)] to ensure reservations persist across restarts
-    pub pending_volume_usd: f64,
+    pub pending_volume_usd: Decimal,
     /// Last trade timestamp
     pub last_trade: Option<DateTime<Utc>>,
     /// Volume reset time (Last date processed)
@@ -195,8 +196,8 @@ pub struct UserState {
 impl Default for UserState {
     fn default() -> Self {
         Self {
-            daily_volume_usd: 0.0,
-            pending_volume_usd: 0.0,
+            daily_volume_usd: Decimal::ZERO,
+            pending_volume_usd: Decimal::ZERO,
             last_trade: None,
             volume_reset: Utc::now(),
         }
@@ -207,9 +208,9 @@ impl Default for UserState {
 
 enum RiskCommand {
     CheckAndReserve { context: TradeContext, checks: Vec<Arc<dyn RiskCheck>>, reply: oneshot::Sender<Result<()>> },
-    Commit { user_id: String, amount_usd: f64, reply: oneshot::Sender<Result<()>> },
-    Rollback { user_id: String, amount_usd: f64 },
-    GetRemaining { user_id: String, reply: oneshot::Sender<f64> },
+    Commit { user_id: String, amount_usd: Decimal, reply: oneshot::Sender<Result<()>> },
+    Rollback { user_id: String, amount_usd: Decimal },
+    GetRemaining { user_id: String, reply: oneshot::Sender<Decimal> },
     LoadState { reply: oneshot::Sender<Result<()>> },
 }
 
@@ -230,119 +231,113 @@ impl RiskActor {
         Ok(())
     }
 
-    async fn handle_check_and_reserve(&mut self, context: TradeContext, checks: &[Arc<dyn RiskCheck>]) -> Result<()> {
-         // 1. Stateless Checks
-        if context.amount_usd > self.config.max_single_trade_usd {
-            return Err(Error::RiskLimitExceeded {
-                limit_type: "single_trade".to_string(),
-                current: format!("${:.2}", context.amount_usd),
-                max: format!("${:.2}", self.config.max_single_trade_usd),
-            });
-        }
-        if context.expected_slippage > self.config.max_slippage_percent {
-            return Err(Error::risk_check_failed("slippage", format!("Slippage {:.2}% > {:.2}%", context.expected_slippage, self.config.max_slippage_percent)));
-        }
-        if let Some(liq) = context.liquidity_usd {
-            if liq < self.config.min_liquidity_usd {
-                return Err(Error::risk_check_failed("liquidity", "Low liquidity"));
-            }
-        }
-        if self.config.enable_rug_detection && context.is_flagged {
-             return Err(Error::risk_check_failed("rug_detection", "Token flagged"));
-        }
+    async fn handle_check_and_reserve(&mut self, context: TradeContext, checks: Vec<Arc<dyn RiskCheck>>) -> Result<()> {
+        // 1. Offload heavy/STATLESS checks to blocking thread
+        // These checks don't need UserState (RAM) and could involve I/O in custom checks
+        let config = self.config.clone();
+        let ctx_clone = context.clone();
+        tokio::task::spawn_blocking(move || {
+             Self::validate_stateless(&config, &ctx_clone, &checks)
+        }).await.map_err(|e| Error::Internal(format!("Task panic: {}", e)))??;
 
-        // 2. Custom Checks
-        for check in checks {
-            if let RiskCheckResult::Rejected { reason } = check.check(&context) {
-                return Err(Error::RiskCheckFailed { check_name: check.name().to_string(), reason });
-            }
-        }
-
-        // 3. Stateful Checks
+        // 2. Perform STATEFUL checks inside Actor (Atomic)
         let state = self.state.entry(context.user_id.clone()).or_default();
-
-        // Fix #4: UTC Midnight Reset
+        
+        // Reset volume if day changed
         let now = Utc::now();
-        let today = now.date_naive();
-        let last_reset = state.volume_reset.date_naive();
-
-        if today > last_reset {
-            state.daily_volume_usd = 0.0;
-            // Fix: Do NOT clear pending volume. Pending volume is reserved for trades 
-            // that haven't committed yet, regardless of when they were reserved.
-            // Clearing it would allow double-spending if a trade reserved 23:59 commits 00:01.
+        if now.date_naive() > state.volume_reset.date_naive() {
+            state.daily_volume_usd = Decimal::ZERO;
             state.volume_reset = now;
         }
 
+        // Daily limit check
         let projected = state.daily_volume_usd + state.pending_volume_usd + context.amount_usd;
         if projected > self.config.max_daily_volume_usd {
-             return Err(Error::RiskLimitExceeded {
+            return Err(Error::RiskLimitExceeded {
                 limit_type: "daily_volume".to_string(),
                 current: format!("${:.2}", projected),
                 max: format!("${:.2}", self.config.max_daily_volume_usd),
             });
         }
 
+        // Cooldown check
         if let Some(last) = state.last_trade {
-             let cd = self.config.trade_cooldown_secs as i64;
-             let elapsed = now - last;
-             if elapsed < chrono::Duration::seconds(cd) {
-                 return Err(Error::risk_check_failed("cooldown", "Cooldown active"));
-             }
+            let elapsed = now - last;
+            if elapsed < chrono::Duration::seconds(self.config.trade_cooldown_secs as i64) {
+                 return Err(Error::risk_check_failed("cooldown", "Trading too fast"));
+            }
         }
 
-        // Reserve
+        // Commit reservation
         state.pending_volume_usd += context.amount_usd;
         
-        // Fix H3: Immediate persistence for critical state changes
-        // Don't rely solely on periodic saves - persist after reserve
-        if let Err(e) = self.store.save(&self.state).await {
-            // Rollback on persistence failure
-            if let Some(s) = self.state.get_mut(&context.user_id) {
-                s.pending_volume_usd = (s.pending_volume_usd - context.amount_usd).max(0.0);
-            }
-            return Err(e);
-        }
+        // Immediate save for reservation
+        self.store.save(&self.state).await?;
         
         Ok(())
     }
 
-    async fn handle_commit(&mut self, user_id: String, amount: f64) -> Result<()> {
+    /// Stateless validation logic - can be run outside Actor
+    fn validate_stateless(config: &RiskConfig, context: &TradeContext, checks: &[Arc<dyn RiskCheck>]) -> Result<()> {
+        if context.amount_usd > config.max_single_trade_usd {
+            return Err(Error::RiskLimitExceeded {
+                limit_type: "single_trade".to_string(),
+                current: format!("${:.2}", context.amount_usd),
+                max: format!("${:.2}", config.max_single_trade_usd),
+            });
+        }
+        if context.expected_slippage > config.max_slippage_percent {
+            return Err(Error::risk_check_failed("slippage", format!("Slippage {} > {}", context.expected_slippage, config.max_slippage_percent)));
+        }
+        if let Some(liq) = context.liquidity_usd {
+            if liq < config.min_liquidity_usd {
+                return Err(Error::risk_check_failed("liquidity", "Insufficient liquidity"));
+            }
+        }
+        if config.enable_rug_detection && context.is_flagged {
+            return Err(Error::risk_check_failed("rug_detection", "Token flagged as risky"));
+        }
+
+        for check in checks {
+            if let RiskCheckResult::Rejected { reason } = check.check(context) {
+                return Err(Error::RiskCheckFailed { check_name: check.name().to_string(), reason });
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_commit(&mut self, user_id: String, amount: Decimal) -> Result<()> {
         let state = self.state.entry(user_id.clone()).or_default();
         
         let old_pending = state.pending_volume_usd;
         let old_daily = state.daily_volume_usd;
         let old_last = state.last_trade;
 
-        state.pending_volume_usd = (state.pending_volume_usd - amount).max(0.0);
+        state.pending_volume_usd = (state.pending_volume_usd - amount).max(Decimal::ZERO);
         state.daily_volume_usd += amount;
         state.last_trade = Some(Utc::now());
 
-        // Fix #1: Strict Commit (Rollback on persistence failure)
         if let Err(e) = self.store.save(&self.state).await {
-            tracing::error!("CRITICAL: Failed to persist risk state for {}: {}. Rolling back memory.", user_id, e);
-            
-            // Rollback in-memory state to maintain consistency with disk
+            // Rollback on failure
             if let Some(s) = self.state.get_mut(&user_id) {
                 s.pending_volume_usd = old_pending;
                 s.daily_volume_usd = old_daily;
                 s.last_trade = old_last;
             }
-            
-            return Err(Error::Internal(format!("Risk persistence failed: {}", e)));
+            return Err(e);
         }
         Ok(())
     }
 
-    fn handle_rollback(&mut self, user_id: String, amount: f64) {
+    fn handle_rollback(&mut self, user_id: String, amount: Decimal) {
         if let Some(state) = self.state.get_mut(&user_id) {
-            state.pending_volume_usd = (state.pending_volume_usd - amount).max(0.0);
+            state.pending_volume_usd = (state.pending_volume_usd - amount).max(Decimal::ZERO);
         }
     }
 
-    fn handle_get_remaining(&self, user_id: String) -> f64 {
+    fn handle_get_remaining(&self, user_id: String) -> Decimal {
         if let Some(state) = self.state.get(&user_id) {
-             (self.config.max_daily_volume_usd - (state.daily_volume_usd + state.pending_volume_usd)).max(0.0)
+             (self.config.max_daily_volume_usd - (state.daily_volume_usd + state.pending_volume_usd)).max(Decimal::ZERO)
         } else {
             self.config.max_daily_volume_usd
         }
@@ -406,7 +401,8 @@ impl RiskManager {
                                     Some(msg) => {
                                          match msg {
                                              RiskCommand::CheckAndReserve { context, checks, reply } => {
-                                                 let res = actor.handle_check_and_reserve(context, &checks).await;
+                                                 // Moved checks into the handler
+                                                 let res = actor.handle_check_and_reserve(context, checks).await;
                                                  dirty = res.is_ok();  // Mark dirty if reservation succeeded
                                                  let _ = reply.send(res);
                                              }
@@ -516,7 +512,7 @@ impl RiskManager {
     }
 
     /// Commit a trade that was previously reserved
-    pub async fn commit_trade(&self, user_id: &str, amount_usd: f64) -> Result<()> {
+    pub async fn commit_trade(&self, user_id: &str, amount_usd: Decimal) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         self.sender.send(RiskCommand::Commit { 
             user_id: user_id.to_string(), 
@@ -528,7 +524,7 @@ impl RiskManager {
     }
 
     /// Rollback a reservation
-    pub async fn rollback_trade(&self, user_id: &str, amount_usd: f64) {
+    pub async fn rollback_trade(&self, user_id: &str, amount_usd: Decimal) {
         let _ = self.sender.send(RiskCommand::Rollback { 
             user_id: user_id.to_string(), 
             amount_usd 
@@ -536,20 +532,20 @@ impl RiskManager {
     }
 
     /// Record a trade immediately
-    pub async fn record_trade(&self, user_id: &str, amount_usd: f64) -> Result<()> {
+    pub async fn record_trade(&self, user_id: &str, amount_usd: Decimal) -> Result<()> {
         self.commit_trade(user_id, amount_usd).await
     }
     
     /// Get remaining daily limit for a user
-    pub async fn remaining_daily_limit(&self, user_id: &str) -> f64 {
+    pub async fn remaining_daily_limit(&self, user_id: &str) -> Decimal {
         let (tx, rx) = oneshot::channel();
         if let Err(_) = self.sender.send(RiskCommand::GetRemaining { 
             user_id: user_id.to_string(), 
             reply: tx 
         }).await {
-            return 0.0;
+            return Decimal::ZERO;
         }
-        rx.await.unwrap_or(0.0)
+        rx.await.unwrap_or(Decimal::ZERO)
     }
 }
 
@@ -564,7 +560,7 @@ mod tests {
     async fn test_single_trade_limit() {
         let manager = RiskManager::with_config(
             RiskConfig {
-                max_single_trade_usd: 1000.0,
+                max_single_trade_usd: dec!(1000.0),
                 ..Default::default()
             },
             Arc::new(InMemoryRiskStore),
@@ -574,9 +570,9 @@ mod tests {
             user_id: "user1".to_string(),
             from_token: "USDC".to_string(),
             to_token: "SOL".to_string(),
-            amount_usd: 5000.0,
-            expected_slippage: 0.5,
-            liquidity_usd: Some(1_000_000.0),
+            amount_usd: dec!(5000.0),
+            expected_slippage: dec!(0.5),
+            liquidity_usd: Some(dec!(1_000_000.0)),
             is_flagged: false,
         };
 
@@ -592,9 +588,9 @@ mod tests {
             user_id: "user1".to_string(),
             from_token: "USDC".to_string(),
             to_token: "SOL".to_string(),
-            amount_usd: 100.0,
-            expected_slippage: 0.5,
-            liquidity_usd: Some(1_000_000.0),
+            amount_usd: dec!(100.0),
+            expected_slippage: dec!(0.5),
+            liquidity_usd: Some(dec!(1_000_000.0)),
             is_flagged: false,
         };
 
@@ -602,10 +598,10 @@ mod tests {
         assert!(manager.check_and_reserve(&context).await.is_ok());
         
         // 2. Commit
-        manager.commit_trade("user1", 100.0).await.unwrap();
+        manager.commit_trade("user1", dec!(100.0)).await.unwrap();
         
         // 3. Check remaining
         let remaining = manager.remaining_daily_limit("user1").await;
-        assert_eq!(remaining, 50_000.0 - 100.0);
+        assert_eq!(remaining, dec!(50_000.0) - dec!(100.0));
     }
 }

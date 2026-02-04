@@ -30,6 +30,7 @@ pub trait Memory: Send + Sync {
 
 /// Short-term memory - stores recent conversation history
 /// Uses a fixed-size ring buffer per user for memory efficiency
+/// Persists to disk (JSON) to allow restarts without losing context.
 pub struct ShortTermMemory {
     /// Max messages to keep per user
     max_messages: usize,
@@ -39,22 +40,81 @@ pub struct ShortTermMemory {
     store: DashMap<String, VecDeque<Message>>,
     /// Track last access time for cleanup
     last_access: DashMap<String, std::time::Instant>,
+    /// Persistence path
+    path: PathBuf,
 }
 
 impl ShortTermMemory {
-    /// Create with custom capacity
-    pub fn new(max_messages: usize, max_users: usize) -> Self {
-        Self {
+    /// Create with custom capacity and persistence path
+    pub async fn new(max_messages: usize, max_users: usize, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let store = DashMap::new();
+        let last_access = DashMap::new();
+        
+        let mem = Self {
             max_messages,
             max_users,
-            store: DashMap::new(),
-            last_access: DashMap::new(),
+            store,
+            last_access,
+            path,
+        };
+        
+        // Try to load existing state
+        if let Err(e) = mem.load().await {
+            tracing::warn!("Failed to load short-term memory from {:?}: {}", mem.path, e);
         }
+        
+        mem
     }
 
     /// Create with default capacity (100 messages per user, 1000 active users)
-    pub fn default_capacity() -> Self {
-        Self::new(100, 1000)
+    pub async fn default_capacity() -> Self {
+        Self::new(100, 1000, "data/short_term_memory.json").await
+    }
+
+    /// Load state from disk
+    async fn load(&self) -> crate::error::Result<()> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        
+        let content = tokio::fs::read_to_string(&self.path).await
+            .map_err(|e| crate::error::Error::Internal(format!("Failed to read memory file: {}", e)))?;
+            
+        if content.trim().is_empty() {
+            return Ok(());
+        }
+
+        let data: HashMap<String, VecDeque<Message>> = serde_json::from_str(&content)
+            .map_err(|e| crate::error::Error::Internal(format!("Failed to parse memory file: {}", e)))?;
+            
+        self.store.clear();
+        for (k, v) in data {
+            self.store.insert(k.clone(), v);
+            self.last_access.insert(k, std::time::Instant::now());
+        }
+        
+        tracing::info!("Loaded short-term memory for {} users", self.store.len());
+        Ok(())
+    }
+
+    /// Save state to disk
+    async fn save(&self) -> crate::error::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+        
+        // Convert DashMap to HashMap for serialization
+        // Note: For 1 user (or 100), this is very cheap. 
+        let data: HashMap<_, _> = self.store.iter().map(|r| (r.key().clone(), r.value().clone())).collect();
+        
+        let json = serde_json::to_string_pretty(&data)
+             .map_err(|e| crate::error::Error::Internal(format!("Failed to serialize memory: {}", e)))?;
+             
+        tokio::fs::write(&self.path, json).await
+             .map_err(|e| crate::error::Error::Internal(format!("Failed to write memory file: {}", e)))?;
+             
+        Ok(())
     }
 
     /// Get current message count for a user/agent pair
@@ -71,7 +131,8 @@ impl ShortTermMemory {
             user_id.to_string()
         }
     }
-    /// Prune inactive users (older than duration)
+    
+    /// Prune inactive users (older than duration) - Useful for manual cleanup
     pub fn prune_inactive(&self, duration: std::time::Duration) {
         let now = std::time::Instant::now();
         // DashMap retain is efficient
@@ -86,19 +147,10 @@ impl ShortTermMemory {
 
     /// Check and enforce total user capacity (LRU eviction)
     fn enforce_user_capacity(&self) {
-        // Fix: If we are AT capacity (or over), we must evict before adding a new one.
         if self.store.len() < self.max_users {
             return;
         }
 
-        // Simple LRU: Find oldest access time and remove
-        // Ideally we would use a more specialized LRU cache data structure, 
-        // but iterating DashMap random sample or finding min is generic enough for "personal use" protection.
-        
-        // Optimization: Just remove a few random if we are way over, or find oldest.
-        // For strict correctness, we find oldest.
-        // Note: iter() on DashMap can be expensive if huge, but we only do this when full.
-        
         let mut oldest_key = None;
         let mut oldest_time = std::time::Instant::now();
 
@@ -126,20 +178,23 @@ impl Memory for ShortTermMemory {
              self.enforce_user_capacity();
         }
 
-        let mut entry = self.store.entry(key.clone()).or_default();
+        {
+            let mut entry = self.store.entry(key.clone()).or_default();
 
-        // Ring buffer behavior: remove oldest if at capacity
-        if entry.len() >= self.max_messages {
-            entry.pop_front();
-        }
-        entry.push_back(message);
+            // Ring buffer behavior: remove oldest if at capacity
+            if entry.len() >= self.max_messages {
+                entry.pop_front();
+            }
+            entry.push_back(message);
+        } // Lock on DashMap bucket dropped here
         
         // Update access time
         self.last_access.insert(key, std::time::Instant::now());
-
-        // Probabilistic cleanup (1% chance)
-        if fastrand::usize(..100) == 0 {
-             self.prune_inactive(std::time::Duration::from_secs(3600)); // 1 hour timeout
+        
+        // Save immediately for safety (Async I/O)
+        // Now safe because we are no longer holding the DashMap write lock
+        if let Err(e) = self.save().await {
+            tracing::error!("Failed to persist short-term memory: {}", e);
         }
 
         Ok(())
@@ -151,7 +206,7 @@ impl Memory for ShortTermMemory {
         self.store
             .get(&key)
             .map(|v| {
-                // Update access time
+                // Update access time on retrieval too
                 self.last_access.insert(key, std::time::Instant::now());
                 
                 let skip = v.len().saturating_sub(limit);
@@ -164,7 +219,9 @@ impl Memory for ShortTermMemory {
         let key = self.key(user_id, agent_id);
         self.store.remove(&key);
         self.last_access.remove(&key);
-        Ok(())
+        
+        // Sync to disk
+        self.save().await
     }
 }
 
@@ -183,6 +240,17 @@ pub struct MemoryEntry {
     pub tags: Vec<String>,
     /// Relevance score (for retrieval ranking)
     pub relevance: f32,
+}
+
+/// Filter for tags during retrieval
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TagFilter {
+    /// Include only if it has ANY of these tags
+    IncludeAny(Vec<String>),
+    /// Exclude if it has ANY of these tags
+    ExcludeAny(Vec<String>),
+    /// No filtering
+    None,
 }
 
 /// Long-term memory - stores important information persistently
@@ -286,40 +354,44 @@ impl LongTermMemory {
 
     /// Retrieve entries by tag with optional agent isolation
     pub async fn retrieve_by_tag(&self, user_id: &str, tag: &str, agent_id: Option<&str>, limit: usize) -> Vec<MemoryEntry> {
-        let uid = user_id.to_string();
-        let tag_to_find = tag.to_string();
-        let aid = agent_id.map(|s| s.to_string());
-
-        let docs = self.store.find(move |idx| {
-            if idx.get_metadata("user_id") != Some(&uid) { return false; }
-            if let Some(ref target_aid) = aid {
-                if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
-            }
-            if let Some(tags_json) = idx.get_metadata("tags") {
-                // Precise JSON matching
-                let tags: Vec<String> = serde_json::from_str(tags_json).unwrap_or_default();
-                tags.contains(&tag_to_find)
-            } else {
-                 false
-            }
-        }).await;
-        
-        docs.into_iter()
-            .filter_map(|doc| Self::doc_to_entry(doc))
-            .take(limit)
-            .collect()
+        self.retrieve_filtered(user_id, agent_id, TagFilter::IncludeAny(vec![tag.to_string()]), limit).await
     }
 
     /// Retrieve recent entries with token awareness (approximate) and optional agent isolation
     pub async fn retrieve_recent(&self, user_id: &str, agent_id: Option<&str>, char_limit: usize) -> Vec<MemoryEntry> {
+        // Default behavior: Exclude "archived" and "do_not_rag"
+        let filter = TagFilter::ExcludeAny(vec!["archived".to_string(), "do_not_rag".to_string()]);
+        
         let uid = user_id.to_string();
         let aid = agent_id.map(|s| s.to_string());
         
-        // Fix #2: Use find_metadata to avoid O(N) disk IO hydration
         let matches = self.store.find_metadata(move |idx| {
             let matches_user = idx.get_metadata("user_id") == Some(&uid);
             let matches_agent = aid.is_none() || idx.get_metadata("agent_id") == aid.as_deref();
-            matches_user && matches_agent
+            
+            if !matches_user || !matches_agent {
+                return false;
+            }
+
+            // Apply Tag Filter
+            if let Some(tags_json) = idx.get_metadata("tags") {
+                let tags: Vec<String> = serde_json::from_str(tags_json).unwrap_or_default();
+                match &filter {
+                    TagFilter::IncludeAny(include_tags) => {
+                        include_tags.iter().any(|t| tags.contains(t))
+                    }
+                    TagFilter::ExcludeAny(exclude_tags) => {
+                        !exclude_tags.iter().any(|t| tags.contains(t))
+                    }
+                    TagFilter::None => true,
+                }
+            } else {
+                // If no tags, include unless we require inclusion
+                match &filter {
+                    TagFilter::IncludeAny(_) => false,
+                    _ => true,
+                }
+            }
         }).await;
 
         if matches.is_empty() {
@@ -350,6 +422,43 @@ impl LongTermMemory {
             }
         }
         result_entries
+    }
+    
+    /// Advanced retrieval with explicit tag filtering
+    pub async fn retrieve_filtered(&self, user_id: &str, agent_id: Option<&str>, filter: TagFilter, limit: usize) -> Vec<MemoryEntry> {
+        let uid = user_id.to_string();
+        let aid = agent_id.map(|s| s.to_string());
+        let filter_clone = filter.clone();
+
+        let docs = self.store.find(move |idx| {
+            if idx.get_metadata("user_id") != Some(&uid) { return false; }
+            if let Some(ref target_aid) = aid {
+                if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
+            }
+            
+            if let Some(tags_json) = idx.get_metadata("tags") {
+                let tags: Vec<String> = serde_json::from_str(tags_json).unwrap_or_default();
+                match &filter_clone {
+                    TagFilter::IncludeAny(include_tags) => {
+                        include_tags.iter().any(|t| tags.contains(t))
+                    }
+                    TagFilter::ExcludeAny(exclude_tags) => {
+                        !exclude_tags.iter().any(|t| tags.contains(t))
+                    }
+                    TagFilter::None => true,
+                }
+            } else {
+                match &filter_clone {
+                    TagFilter::IncludeAny(_) => false,
+                    _ => true,
+                }
+            }
+        }).await;
+        
+        docs.into_iter()
+            .filter_map(|doc| Self::doc_to_entry(doc))
+            .take(limit)
+            .collect()
     }
 
     /// Helper to convert Document to MemoryEntry
@@ -444,8 +553,9 @@ impl MemoryManager {
 
     /// Create with custom capacities and path
     pub async fn with_capacity(short_term_max: usize, short_term_users: usize, long_term_max: usize, path: PathBuf) -> crate::error::Result<Self> {
+        let short_term_path = path.with_extension("stm.json");
         Ok(Self {
-            short_term: Arc::new(ShortTermMemory::new(short_term_max, short_term_users)),
+            short_term: Arc::new(ShortTermMemory::new(short_term_max, short_term_users, short_term_path).await),
             long_term: Arc::new(LongTermMemory::new(long_term_max, path).await?),
         })
     }
@@ -457,7 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_short_term_memory() {
-        let memory = ShortTermMemory::new(3, 10);
+        let memory = ShortTermMemory::new(3, 10, "test_stm.json").await;
 
         memory.store("user1", None, Message::user("Hello")).await.unwrap();
         memory.store("user1", None, Message::assistant("Hi there")).await.unwrap();
@@ -468,6 +578,29 @@ mod tests {
         let messages = memory.retrieve("user1", None, 10).await;
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].text(), "Hi there");
+        
+        let _ = std::fs::remove_file("test_stm.json");
+    }
+
+    #[tokio::test]
+    async fn test_short_term_persistence() {
+        let path = PathBuf::from("test_stm_persist.json");
+        // Clean start
+        if path.exists() { let _ = std::fs::remove_file(&path); }
+        
+        {
+            let memory = ShortTermMemory::new(100, 10, path.clone()).await;
+            memory.store("user1", None, Message::user("Memory check")).await.unwrap();
+            // Should save automatically
+        }
+        
+        // Relief from disk
+        let memory2 = ShortTermMemory::new(100, 10, path.clone()).await;
+        let msgs = memory2.retrieve("user1", None, 10).await;
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text(), "Memory check");
+        
+        let _ = std::fs::remove_file(&path);
     }
 
 
@@ -554,7 +687,7 @@ mod tests {
         }
 
         // Force prune (since store_entry is probabilistic)
-        memory.prune(10, "user1".to_string(), None).await;
+        let _ = memory.prune(10, "user1".to_string(), None).await;
         
         // Wait for async prune
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

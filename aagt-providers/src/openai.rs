@@ -2,8 +2,7 @@
 //!
 //! Also compatible with OpenAI-compatible APIs like Groq, Mistral, etc.
 
-use std::pin::Pin;
-use std::sync::Arc;
+
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -232,7 +231,7 @@ impl OpenAI {
                                 text_acc = content; // Tool result content is simple string usually
                             },
                             // Audio/Video skipped for now
-                            _ => {}
+
                         }
                     }
                     
@@ -478,8 +477,11 @@ where
 
 /// Common model constants
 pub const GPT_4O: &str = "gpt-4o";
+/// OpenAI Models
 pub const GPT_4O_MINI: &str = "gpt-4o-mini";
+/// GPT-4 Turbo
 pub const GPT_4_TURBO: &str = "gpt-4-turbo";
+/// GPT-3.5 Turbo
 pub const GPT_35_TURBO: &str = "gpt-3.5-turbo";
 
 #[cfg(test)]

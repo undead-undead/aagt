@@ -9,16 +9,16 @@
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::process::Command;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tracing::{info, warn, error};
 
 use crate::error::{Error, Result};
 use crate::tool::{Tool, ToolDefinition};
 use crate::risk::RiskManager;
+use crate::strategy::{Action, ActionExecutor};
 
 /// Metadata extracted from a `SKILL.md` frontmatter
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +65,7 @@ pub struct DynamicSkill {
     instructions: String,
     base_dir: PathBuf,
     risk_manager: Option<Arc<RiskManager>>,
+    executor: Option<Arc<dyn ActionExecutor>>,
     execution_config: SkillExecutionConfig,
 }
 
@@ -76,6 +77,7 @@ impl DynamicSkill {
             instructions,
             base_dir,
             risk_manager: None,
+            executor: None,
             execution_config: SkillExecutionConfig::default(),
         }
     }
@@ -83,6 +85,12 @@ impl DynamicSkill {
     /// Set a risk manager for validating proposals
     pub fn with_risk_manager(mut self, risk_manager: Arc<RiskManager>) -> Self {
         self.risk_manager = Some(risk_manager);
+        self
+    }
+
+    /// Set an action executor for executing approved proposals
+    pub fn with_executor(mut self, executor: Arc<dyn ActionExecutor>) -> Self {
+        self.executor = Some(executor);
         self
     }
 
@@ -97,10 +105,10 @@ impl DynamicSkill {
 pub struct Proposal {
     pub from_token: String,
     pub to_token: String,
-    pub amount_usd: f64,
+    pub amount_usd: rust_decimal::Decimal,
     /// Amount string for the action (e.g. "100", "50%", "max")
     pub amount: String,
-    pub expected_slippage: Option<f64>,
+    pub expected_slippage: Option<rust_decimal::Decimal>,
 }
 
 #[async_trait]
@@ -158,7 +166,7 @@ impl Tool for DynamicSkill {
             cmd.env("NO_PROXY", "*");
         }
 
-        let mut child = cmd.spawn()
+        let child = cmd.spawn()
             .map_err(|e| Error::tool_execution(self.name(), format!("Failed to spawn process: {}", e)))?;
 
         // Save process ID before moving child
@@ -219,7 +227,7 @@ impl Tool for DynamicSkill {
                             from_token: proposal.from_token.clone(),
                             to_token: proposal.to_token.clone(),
                             amount_usd: proposal.amount_usd,
-                            expected_slippage: proposal.expected_slippage.unwrap_or(1.0),
+                            expected_slippage: proposal.expected_slippage.unwrap_or(rust_decimal_macros::dec!(1.0)),
                             liquidity_usd: None,
                             is_flagged: false,
                         };
@@ -230,13 +238,31 @@ impl Tool for DynamicSkill {
 
                         info!("Risk check approved for skill {}", self.name());
 
-                        // 2. Execute Action (Simulation for now, or real if executor provided)
-                        // In a real scenario, we'd use the provided executor to perform the swap.
-                        // For this prototype, we record the success and return.
-                        
-                        rm.commit_trade(&context.user_id, context.amount_usd).await?;
-                        
-                        return Ok(format!("SUCCESS: Trade executed after risk approval. Details: {:?}", proposal));
+                        // 2. Execute Action
+                        if let Some(ref executor) = self.executor {
+                             // Map Proposal to Action::Swap
+                             let action = Action::Swap {
+                                 from_token: proposal.from_token,
+                                 to_token: proposal.to_token,
+                                 amount: proposal.amount,
+                             };
+                             
+                             let pipeline_ctx = crate::pipeline::Context::new(format!("Skill execution: {}", self.name()));
+                             // We could pass more context if needed
+                             
+                             let result = executor.execute(&action, &pipeline_ctx).await
+                                .map_err(|e| Error::tool_execution(self.name(), format!("Execution Failed: {}", e)))?;
+                                
+                             // Once executed success, we confirm the trade to RiskManager (commit)
+                             rm.commit_trade(&context.user_id, context.amount_usd).await?;
+                             
+                             return Ok(format!("SUCCESS: Trade executed: {}", result));
+                        } else {
+                            // Simulation Mode (Legacy behavior)
+                            // Still commit the risk usage as "Paper Trading"
+                            rm.commit_trade(&context.user_id, context.amount_usd).await?;
+                            return Ok(format!("SIMULATION SUCCESS: Trade approved by risk manager but NO EXECUTOR configured. Proposal: {:?}", proposal));
+                        }
                     } else {
                         return Err(Error::tool_execution(self.name(), "RiskManager not configured, cannot execute risky proposal".to_string()));
                     }
@@ -253,6 +279,7 @@ pub struct SkillLoader {
     pub skills: HashMap<String, Arc<DynamicSkill>>,
     base_path: PathBuf,
     risk_manager: Option<Arc<RiskManager>>,
+    executor: Option<Arc<dyn ActionExecutor>>,
 }
 
 impl SkillLoader {
@@ -262,12 +289,19 @@ impl SkillLoader {
             skills: HashMap::new(),
             base_path: base_path.into(),
             risk_manager: None,
+            executor: None,
         }
     }
 
     /// Set a risk manager for all loaded skills
     pub fn with_risk_manager(mut self, risk_manager: Arc<RiskManager>) -> Self {
         self.risk_manager = Some(risk_manager);
+        self
+    }
+
+    /// Set an executor for all loaded skills
+    pub fn with_executor(mut self, executor: Arc<dyn ActionExecutor>) -> Self {
+        self.executor = Some(executor);
         self
     }
 
@@ -285,6 +319,9 @@ impl SkillLoader {
                     if let Some(ref rm) = self.risk_manager {
                         skill = skill.with_risk_manager(Arc::clone(rm));
                     }
+                    if let Some(ref exec) = self.executor {
+                        skill = skill.with_executor(Arc::clone(exec));
+                    }
                     info!("Loaded dynamic skill: {}", skill.name());
                     self.skills.insert(skill.name(), Arc::new(skill));
                 }
@@ -301,33 +338,44 @@ impl SkillLoader {
 
         let content = tokio::fs::read_to_string(&manifest_path).await?;
         
-        // Simple Manual Parser for YAML Frontmatter
-        // (Avoiding adding more dependencies for now as per minimal footprint goal)
-        let mut lines = content.lines();
-        if lines.next() != Some("---") {
-            return Err(Error::Internal("SKILL.md must start with ---".to_string()));
+        // Find frontmatter delimiters
+        let start_delimiter = "---\n";
+        let end_delimiter = "\n---";
+        
+        // Normalize line endings for delimiter search? 
+        // Or just search based on robust logic.
+        // Let's assume \n or \r\n. 
+        // We will look for "\n---" which indicates the end delimiter on its own line.
+        
+        let yaml_str;
+        let instructions;
+
+        // Ensure file starts with YAML frontmatter
+        if content.starts_with(start_delimiter) || content.starts_with("---\r\n") {
+             // Find end of frontmatter
+             if let Some(end_idx) = content[4..].find(end_delimiter) {
+                 let actual_end_idx = end_idx + 4; // Add back the initial offset
+                 yaml_str = &content[4..actual_end_idx]; // Exclude delimiters
+                 
+                 // Instructions start after the end delimiter + delimiter length (4 chars for \n---)
+                 // content[actual_end_idx] starts with \n. 
+                 // \n--- is 4 chars.
+                 let rest_start = actual_end_idx + 4;
+                 if rest_start < content.len() {
+                     instructions = content[rest_start..].trim().to_string();
+                 } else {
+                     instructions = String::new();
+                 }
+             } else {
+                 return Err(Error::Internal("SKILL.md frontmatter unclosed (missing closing ---)".to_string()));
+             }
+        } else {
+             return Err(Error::Internal("SKILL.md must start with ---".to_string()));
         }
 
-        let mut yaml_str = String::new();
-        let mut found_end = false;
-        for line in lines.by_ref() {
-            if line == "---" {
-                found_end = true;
-                break;
-            }
-            yaml_str.push_str(line);
-            yaml_str.push('\n');
-        }
-
-        if !found_end {
-            return Err(Error::Internal("SKILL.md frontmatter unclosed".to_string()));
-        }
-
-        let metadata: SkillMetadata = serde_yaml_ng::from_str(&yaml_str)
+        let metadata: SkillMetadata = serde_yaml_ng::from_str(yaml_str)
             .map_err(|e| Error::Internal(format!("Failed to parse Skill YAML: {}", e)))?;
         
-        let instructions = lines.collect::<Vec<_>>().join("\n");
-
         Ok(DynamicSkill::new(metadata, instructions, path.to_path_buf()))
     }
 }

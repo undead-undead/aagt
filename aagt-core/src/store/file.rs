@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::info;
+
 use std::path::PathBuf;
 use std::io::{Seek, SeekFrom, Write};
 use tokio::fs;
@@ -198,13 +198,13 @@ impl FileStoreActor {
     // This is NOT an actor message handler but a static helper we'll use in FileStore::search
     async fn read_batch(path: PathBuf, reads: Vec<(u64, u64)>) -> Result<Vec<StoredDocument>> {
         tokio::task::spawn_blocking(move || {
-             let mut file = std::fs::File::open(&path)
+             let file = std::fs::File::open(&path)
                 .map_err(|e| Error::MemoryStorage(format!("Failed to open for batch read: {}", e)))?;
              
              // Shared lock for reading? Optional but good for consistency
              // But 'pred' doesn't require locking usually if we don't care about torn reads on append (which shouldn't happen with atomic writes)
              // fs2::lock_shared might block if compaction is running, which is GOOD.
-             use fs2::FileExt;
+
              file.lock_shared().ok(); // Best effort lock
              
              let mut results = Vec::with_capacity(reads.len());

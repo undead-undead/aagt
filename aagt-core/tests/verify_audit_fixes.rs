@@ -1,9 +1,9 @@
 use aagt_core::prelude::*;
 use aagt_core::memory::{LongTermMemory, MemoryEntry};
 use aagt_core::strategy::{FileStrategyStore, Strategy, StrategyStore, Condition, Action};
-use aagt_core::skill::{SkillLoader, SkillMetadata};
+use aagt_core::skill::SkillLoader;
 use std::sync::Arc;
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 
 #[tokio::test]
 async fn test_long_term_memory_optimization() {

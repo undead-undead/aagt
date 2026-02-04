@@ -9,9 +9,10 @@
 /// - Max daily volume
 /// - Slippage limits
 
-use aagt_core::prelude::*;
+
 use aagt_core::risk::{RiskManager, RiskConfig, TradeContext, InMemoryRiskStore};
 use std::sync::Arc;
+use rust_decimal_macros::dec;
 use anyhow::Result;
 
 #[tokio::main]
@@ -20,10 +21,10 @@ async fn main() -> Result<()> {
     
     // 1. Define Risk Configuration
     let config = RiskConfig {
-        max_single_trade_usd: 1000.0,
-        max_daily_volume_usd: 5000.0,
-        max_slippage_percent: 2.0,
-        min_liquidity_usd: 50_000.0,
+        max_single_trade_usd: dec!(1000.0),
+        max_daily_volume_usd: dec!(5000.0),
+        max_slippage_percent: dec!(2.0),
+        min_liquidity_usd: dec!(50000.0),
         enable_rug_detection: true,
         trade_cooldown_secs: 0, // Disable cooldown for this demo
     };
@@ -44,9 +45,9 @@ async fn main() -> Result<()> {
         user_id: "user123".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 500.0,
-        expected_slippage: 0.5,
-        liquidity_usd: Some(1_000_000.0),
+        amount_usd: dec!(500.0),
+        expected_slippage: dec!(0.5),
+        liquidity_usd: Some(dec!(1000000.0)),
         is_flagged: false,
     };
 
@@ -67,9 +68,9 @@ async fn main() -> Result<()> {
         user_id: "user123".to_string(),
         from_token: "USDC".to_string(),
         to_token: "BTC".to_string(),
-        amount_usd: 2000.0, // Limit is 1000
-        expected_slippage: 0.5,
-        liquidity_usd: Some(1_000_000.0),
+        amount_usd: dec!(2000.0), // Limit is 1000
+        expected_slippage: dec!(0.5),
+        liquidity_usd: Some(dec!(1000000.0)),
         is_flagged: false,
     };
 
@@ -87,9 +88,9 @@ async fn main() -> Result<()> {
             user_id: "user123".to_string(),
             from_token: "USDC".to_string(),
             to_token: "SOL".to_string(),
-            amount_usd: 800.0,
-            expected_slippage: 0.1,
-            liquidity_usd: Some(1_000_000.0),
+            amount_usd: dec!(800.0),
+            expected_slippage: dec!(0.1),
+            liquidity_usd: Some(dec!(1000000.0)),
             is_flagged: false,
         };
 

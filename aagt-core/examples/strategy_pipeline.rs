@@ -13,11 +13,14 @@ use aagt_core::pipeline::{Pipeline, Step, Context};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 // Mock Step for fetching price (in real app, this calls an API)
 struct FetchPriceStep {
     token: String,
-    mock_price: f64,
+    mock_price: Decimal,
 }
 
 #[async_trait]
@@ -29,7 +32,7 @@ impl Step for FetchPriceStep {
         // Inject mock price into context
         ctx.set(
             &format!("price_{}", self.token), 
-            serde_json::to_value(self.mock_price)?
+            serde_json::to_value(self.mock_price.to_f64().unwrap_or(0.0))?
         );
         Ok(())
     }
@@ -51,7 +54,8 @@ impl Step for EvaluateStrategyStep {
             Condition::PriceAbove { token, threshold } => {
                 let key = format!("price_{}", token);
                 if let Some(val) = ctx.get(&key) {
-                    let price = val.as_f64().unwrap_or(0.0);
+                    let price_f64 = val.as_f64().unwrap_or(0.0);
+                    let price = Decimal::from_f64_retain(price_f64).unwrap_or(Decimal::ZERO);
                     println!("         Current Price: ${} | Threshold: ${}", price, threshold);
                     price > *threshold
                 } else {
@@ -86,7 +90,7 @@ async fn main() -> Result<()> {
         created_at: Utc::now().timestamp(),
         condition: Condition::PriceAbove {
             token: "SOL".to_string(),
-            threshold: 200.0,
+            threshold: dec!(200.0),
         },
         actions: vec![
             Action::Swap {
@@ -108,7 +112,7 @@ async fn main() -> Result<()> {
     // We mix data fetching + logic evaluation.
     // Note: We pass structs directly, not Boxed, as Pipeline::add_step takes impl Step
     let pipeline = Pipeline::new("Trade Executor")
-        .add_step(FetchPriceStep { token: "SOL".to_string(), mock_price: 205.50 })
+        .add_step(FetchPriceStep { token: "SOL".to_string(), mock_price: dec!(205.50) })
         .add_step(EvaluateStrategyStep { strategy });
 
     // 3. Execute

@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         ("Solana is a high-performance blockchain.", "solana", vec![0.0, 0.0, 1.0]),
     ];
 
-    for (content, tag, vec) in docs {
+    for (content, tag, _vec) in docs {
         let mut metadata = HashMap::new();
         metadata.insert("tag".to_string(), tag.to_string());
         

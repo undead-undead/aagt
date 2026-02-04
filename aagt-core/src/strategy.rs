@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::pipeline::{self, Step, Context};
+use rust_decimal::Decimal;
 
 /// A condition that can trigger a strategy
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,17 +16,17 @@ pub enum Condition {
     /// Price crosses above threshold
     PriceAbove {
         token: String,
-        threshold: f64,
+        threshold: Decimal,
     },
     /// Price crosses below threshold
     PriceBelow {
         token: String,
-        threshold: f64,
+        threshold: Decimal,
     },
     /// Price changes by percentage
     PriceChange {
         token: String,
-        percent: f64,
+        percent: Decimal,
         direction: PriceDirection,
     },
     /// Time-based trigger
@@ -235,15 +236,34 @@ impl StrategyActor {
             return Ok(Vec::new());
         }
         
-        let content = std::fs::read_to_string(&self.path)
-            .map_err(|e| crate::error::Error::Internal(format!("Read error: {}", e)))?;
+        let file = std::fs::File::open(&self.path)
+            .map_err(|e| crate::error::Error::Internal(format!("Open error: {}", e)))?;
             
-        if content.trim().is_empty() {
-            return Ok(Vec::new());
-        }
+        // Fix: Shared Lock for Reading
+
+        file.lock_shared()
+            .map_err(|e| crate::error::Error::Internal(format!("Lock error: {}", e)))?;
+            
+        // Use a scope guard or explicit unlock? Flocking releases on close automatically.
+        // We read content while locked.
+        let buf_reader = std::io::BufReader::new(&file);
+        let strategies: Vec<Strategy> = match serde_json::from_reader(buf_reader) {
+            Ok(s) => s,
+            Err(e) => {
+                // If empty or corrupt, return empty or error?
+                // For robustness, if file is empty JSON might fail.
+                // Check metadata size?
+                if file.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+                    Vec::new()
+                } else {
+                    return Err(crate::error::Error::Internal(format!("Parse error: {}", e)));
+                }
+            }
+        };
         
-        serde_json::from_str(&content)
-            .map_err(|e| crate::error::Error::Internal(format!("Parse error: {}", e)))
+        file.unlock().ok(); // Best effort unlock
+        
+        Ok(strategies)
     }
     
     fn write_strategies(&self, strategies: &[Strategy]) -> Result<()> {
@@ -253,27 +273,40 @@ impl StrategyActor {
                 .map_err(|e| crate::error::Error::Internal(format!("Dir creation error: {}", e)))?;
         }
         
-        // Atomic write: tmp + rename
-        let tmp_path = self.path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-        
-        {
-            let file = std::fs::File::create(&tmp_path)
-                .map_err(|e| crate::error::Error::Internal(format!("Tmp file creation error: {}", e)))?;
-                
-            serde_json::to_writer_pretty(&file, strategies)
-                .map_err(|e| crate::error::Error::Internal(format!("Serialization error: {}", e)))?;
-                
-            file.sync_all()
-                .map_err(|e| crate::error::Error::Internal(format!("Sync error: {}", e)))?;
-        }
-        
-        std::fs::rename(&tmp_path, &self.path)
-            .map_err(|e| {
-                // Clean up tmp file on failure
-                let _ = std::fs::remove_file(&tmp_path);
-                crate::error::Error::Internal(format!("Rename error: {}", e))
-            })?;
+        // Open with write access and create if missing
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false) // Don't truncate yet, wait for lock
+            .open(&self.path)
+            .map_err(|e| crate::error::Error::Internal(format!("File open error: {}", e)))?;
             
+        // Fix: Exclusive Lock for Writing
+        use fs2::FileExt;
+        file.lock_exclusive()
+            .map_err(|e| crate::error::Error::Internal(format!("Lock error: {}", e)))?;
+            
+        // Truncate now that we own the lock
+        file.set_len(0)
+             .map_err(|e| crate::error::Error::Internal(format!("Truncate error: {}", e)))?;
+             
+        // Re-open/Seek to start? Or just write to this handle.
+        // File position might not be 0 after open? open options doc says it is.
+        // But better safe.
+        use std::io::Seek;
+        let mut file = file; // shadowing to mut
+        file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|e| crate::error::Error::Internal(format!("Seek error: {}", e)))?;
+            
+        serde_json::to_writer_pretty(&file, strategies)
+            .map_err(|e| crate::error::Error::Internal(format!("Serialization error: {}", e)))?;
+            
+        file.sync_all()
+            .map_err(|e| crate::error::Error::Internal(format!("Sync error: {}", e)))?;
+            
+        file.unlock().ok();
+        
         Ok(())
     }
     

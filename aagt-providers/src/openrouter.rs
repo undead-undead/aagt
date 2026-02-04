@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::{Error, Result, Message, StreamingResponse, ToolDefinition, Provider, HttpConfig};
+use crate::{Error, Result, Message, StreamingResponse, ToolDefinition, Provider};
 use crate::openai::OpenAI;
 
 /// OpenRouter API client (OpenAI compatible with model routing)
@@ -48,7 +48,11 @@ impl Provider for OpenRouter {
 }
 
 /// Popular models on OpenRouter
+/// Claude 3.5 Sonnet via OpenRouter
 pub const CLAUDE_3_5_SONNET: &str = "anthropic/claude-3.5-sonnet";
+/// OpenAI GPT-4o via OpenRouter
 pub const GPT_4O: &str = "openai/gpt-4o";
+/// Gemini 2.0 Flash via OpenRouter
 pub const GEMINI_FLASH: &str = "google/gemini-2.0-flash-exp";
+/// Llama 3.3 70B via OpenRouter
 pub const LLAMA_70B: &str = "meta-llama/llama-3.3-70b-instruct";

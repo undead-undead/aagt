@@ -1,6 +1,8 @@
 //! Integration tests for aagt-core
 
 use aagt_core::prelude::*;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 #[test]
 fn test_message_creation() {
@@ -55,7 +57,7 @@ fn test_agent_config_default() {
 async fn test_memory_short_term() {
     use aagt_core::memory::{Memory, ShortTermMemory};
 
-    let memory = ShortTermMemory::new(5, 100);
+    let memory = ShortTermMemory::new(5, 100, "test_integration_stm.json").await;
     
     memory.store("user1", None, Message::user("Message 1")).await.unwrap();
     memory.store("user1", None, Message::user("Message 2")).await.unwrap();
@@ -105,8 +107,8 @@ fn test_risk_config() {
     use aagt_core::risk::RiskConfig;
 
     let config = RiskConfig::default();
-    assert!(config.max_single_trade_usd > 0.0);
-    assert!(config.max_daily_volume_usd > 0.0);
+    assert!(config.max_single_trade_usd > Decimal::ZERO);
+    assert!(config.max_daily_volume_usd > Decimal::ZERO);
 }
 
 #[tokio::test]
@@ -115,10 +117,10 @@ async fn test_risk_manager_basic_checks() {
     use std::sync::Arc;
 
     let config = RiskConfig {
-        max_single_trade_usd: 10_000.0,
-        max_daily_volume_usd: 50_000.0,
-        max_slippage_percent: 5.0,
-        min_liquidity_usd: 100_000.0,
+        max_single_trade_usd: dec!(10000.0),
+        max_daily_volume_usd: dec!(50000.0),
+        max_slippage_percent: dec!(5.0),
+        min_liquidity_usd: dec!(100000.0),
         enable_rug_detection: true,
         trade_cooldown_secs: 5,
     };
@@ -130,9 +132,9 @@ async fn test_risk_manager_basic_checks() {
         user_id: "user1".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 1000.0,
-        expected_slippage: 0.5,
-        liquidity_usd: Some(500_000.0),
+        amount_usd: dec!(1000.0),
+        expected_slippage: dec!(0.5),
+        liquidity_usd: Some(dec!(500000.0)),
         is_flagged: false,
     };
 
@@ -143,9 +145,9 @@ async fn test_risk_manager_basic_checks() {
         user_id: "user1".to_string(),
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount_usd: 15_000.0, // Exceeds 10k limit
-        expected_slippage: 0.5,
-        liquidity_usd: Some(500_000.0),
+        amount_usd: dec!(15000.0), // Exceeds 10k limit
+        expected_slippage: dec!(0.5),
+        liquidity_usd: Some(dec!(500000.0)),
         is_flagged: false,
     };
 
@@ -158,7 +160,7 @@ fn test_strategy_condition_serialization() {
 
     let condition = Condition::PriceAbove {
         token: "SOL".to_string(),
-        threshold: 200.0,
+        threshold: dec!(200.0),
     };
 
     let json = serde_json::to_string(&condition).unwrap();
@@ -167,7 +169,7 @@ fn test_strategy_condition_serialization() {
     match parsed {
         Condition::PriceAbove { token, threshold } => {
             assert_eq!(token, "SOL");
-            assert_eq!(threshold, 200.0);
+            assert_eq!(threshold, dec!(200.0));
         }
         _ => panic!("Wrong condition type"),
     }
@@ -182,8 +184,8 @@ async fn test_simulation_basic() {
     let request = SimulationRequest {
         from_token: "USDC".to_string(),
         to_token: "SOL".to_string(),
-        amount: 1000.0,
-        slippage_tolerance: 1.0,
+        amount: dec!(1000.0),
+        slippage_tolerance: dec!(1.0),
         chain: "solana".to_string(),
         exchange: None,
     };
@@ -191,8 +193,8 @@ async fn test_simulation_basic() {
     let result = simulator.simulate(&request).await.unwrap();
     
     assert!(result.success);
-    assert!(result.output_amount > 0.0);
-    assert!(result.gas_cost_usd >= 0.0);
+    assert!(result.output_amount > Decimal::ZERO);
+    assert!(result.gas_cost_usd >= Decimal::ZERO);
 }
 
 #[test]

@@ -4,7 +4,7 @@ use aagt_core::memory::{ShortTermMemory, Memory};
 #[tokio::main]
 async fn main() -> Result<()> {
     // 1. Setup Memory
-    let memory = ShortTermMemory::new(10, 100);
+    let memory = ShortTermMemory::new(10, 100, "test_isolation.json").await;
     let user_id = "user_verify_isolation";
 
     println!("--- Verifying Memory Isolation ---");

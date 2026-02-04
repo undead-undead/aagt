@@ -1,4 +1,4 @@
-use aagt_core::prelude::*;
+
 use aagt_core::tool::{Tool, ToolDefinition};
 use aagt_core::error::{Result};
 use async_trait::async_trait;
@@ -27,7 +27,7 @@ impl Tool for MarkdownSkill {
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, _arguments: &str) -> Result<String> {
         if let Some(ref script) = self.script_path {
             // Logic to execute external script (Python/Node/etc)
             // This is where OpenClaw-like behavior happens
