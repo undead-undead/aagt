@@ -424,11 +424,15 @@ impl HybridSearchEngine {
 
         #[cfg(feature = "vector")]
         {
-            stats.total_vectors = self.vector_store.len();
-            stats.vector_dimension = self.vector_store.dimension();
+            let mut final_stats = stats;
+            final_stats.total_vectors = self.vector_store.len();
+            final_stats.vector_dimension = self.vector_store.dimension();
+            final_stats
         }
-
-        stats
+        #[cfg(not(feature = "vector"))]
+        {
+            stats
+        }
     }
 
     /// Save vector store to disk
@@ -568,6 +572,7 @@ mod tests {
     fn test_save_and_load_vectors() {
         let temp_dir = TempDir::new().unwrap();
         let config = create_test_config(&temp_dir);
+        #[cfg(feature = "vector")]
         let vector_path = config.vector_store_path.clone().unwrap();
 
         {
@@ -590,11 +595,15 @@ mod tests {
         }
 
         // Vector file should exist
+        #[cfg(feature = "vector")]
         assert!(vector_path.exists());
 
         // Load in new engine
         let engine2 = HybridSearchEngine::new(config).unwrap();
+        #[cfg(feature = "vector")]
         assert!(engine2.vector_store.len() > 0);
+        #[cfg(not(feature = "vector"))]
+        assert_eq!(engine2.stats().total_documents, 1);
     }
 
     #[test]
