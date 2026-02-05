@@ -1,6 +1,6 @@
 [package]
 name = "aagt-qmd"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["AAGT Team"]
 description = "QMD-inspired hybrid search engine for AAGT - SQLite FTS5 + Vector + Content-Addressable Storage"
