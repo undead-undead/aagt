@@ -534,7 +534,7 @@ impl QmdStore {
     pub fn vacuum_content(&self) -> Result<usize> {
         info!("Vacuuming orphaned content");
 
-        let mut conn = self
+        let conn = self
             .conn
             .lock()
             .map_err(|_| QmdError::Custom("Lock poisoned".to_string()))?;

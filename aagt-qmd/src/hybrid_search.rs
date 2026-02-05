@@ -12,7 +12,6 @@ use crate::store::{Collection, Document, QmdStore};
 #[cfg(feature = "vector")]
 use crate::vector_store::{VectorSearchResult, VectorStore};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 /// Configuration for hybrid search
 #[derive(Debug, Clone)]
@@ -416,7 +415,7 @@ impl HybridSearchEngine {
     pub fn stats(&self) -> HybridSearchStats {
         let qmd_stats = self.qmd_store.get_stats().unwrap_or_default();
 
-        let mut stats = HybridSearchStats {
+        let stats = HybridSearchStats {
             total_documents: qmd_stats.total_documents,
             total_collections: qmd_stats.total_collections,
             database_size_bytes: qmd_stats.database_size_bytes,

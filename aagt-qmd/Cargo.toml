@@ -1,10 +1,11 @@
 [package]
 name = "aagt-qmd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["AAGT Team"]
 description = "QMD-inspired hybrid search engine for AAGT - SQLite FTS5 + Vector + Content-Addressable Storage"
 license = "MIT OR Apache-2.0"
+exclude = ["models", "*.db", "*.onnx", "*.safetensors"]
 
 [dependencies]
 # Core async runtime
