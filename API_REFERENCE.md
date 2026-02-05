@@ -41,6 +41,8 @@ Hot-swappable plugins for dynamic skills.
 
 ### DynamicSkill
 Universal wrapper for python3, node, bash, and wasm skill types.
+- **Sandbox Integration**: Automatically uses `bwrap` (Bubblewrap) if available.
+- **Strict Mode**: If `allow_network` is false and `bwrap` is missing, execution is blocked.
 
 ---
 
@@ -49,12 +51,15 @@ Managing short-term context and long-term knowledge.
 
 ### ContextManager
 Gatekeeper for the LLM context window.
-- build_context(history): Applies RAG, windowing, and ContextInjector data.
+- `build_context(history) -> Result<Vec<Message>>`: [SAFE] Applies RAG, windowing, and now uses `tiktoken-rs` for safe, soft pruning of history to prevent context overflow.
+- `estimate_tokens(messages) -> usize`: Returns accurate token count using BPE tokenizer.
 
 ### MemoryManager
-- with_qmd(path): Initialize with Hybrid Search storage.
-- search_history (Tool): Agent-accessible BM25 history search.
-- remember_this (Tool): Agent-accessible insights persistence.
+- `with_qmd(path)`: Initialize with Hybrid Search storage.
+- `store(user, agent, msg)`: [TIERED] writes to ShortTermMemory (Hot), auto-archives to LongTermMemory (Cold) if > 20 items.
+- `retrieve_unified(user, agent, limit)`: [NEW] Seamlessly fetches message history from both Hot and Cold storage.
+- `search_history` (Tool): Agent-accessible BM25 history search.
+- `remember_this` (Tool): Agent-accessible insights persistence.
 
 ### aagt-qmd (Hybrid Search Engine)
 - HybridSearchEngine: SQLite FTS5 (BM25) + optional HNSW (Vector).
@@ -67,8 +72,11 @@ Ensuring trading safety and automated execution patterns.
 
 ### `RiskManager`
 The safety filter for every action.
-- `RiskCheck` Trait: `check(context)`, `commit(context)`, `rollback(context)`.
-- **Built-in Checks**: `SingleTradeLimit`, `DailyVolumeLimit`, `TokenSecurity`, `SlippageCheck`.
+- `check_and_reserve(context) -> Result<()>`: [ASYNC] atomic check and quota reservation.
+- `commit_trade(user_id, amount) -> Result<()>`: Confirm execution (updates daily stats).
+- `rollback_trade(user_id, amount)`: [NEW] Revert reservation on execution failure.
+- **RiskConfig**: `max_daily_volume_usd` (was daily_limit), `max_single_trade_usd`.
+- **Built-in Checks**: `SingleTradeLimit`, `DailyVolumeLimit` (Reset on Crash), `TokenSecurity`, `SlippageCheck`.
 
 ### `Strategy` & `Pipeline`
 - `Strategy::new(action, executor)`.

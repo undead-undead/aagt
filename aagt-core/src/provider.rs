@@ -7,6 +7,10 @@ use crate::message::Message;
 use crate::streaming::StreamingResponse;
 use crate::tool::ToolDefinition;
 
+mod resilient;
+
+pub use resilient::{ResilientProvider, CircuitBreakerConfig};
+
 /// Trait for LLM providers
 ///
 /// Implement this trait to add support for a new LLM provider.

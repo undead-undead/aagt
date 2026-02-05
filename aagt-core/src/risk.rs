@@ -225,7 +225,17 @@ struct RiskActor {
 impl RiskActor {
 
     async fn handle_load(&mut self) -> Result<()> {
-        let loaded = self.store.load().await?;
+        let mut loaded = self.store.load().await?;
+        
+        // Fix #2.1: Clear zombie pending volumes on startup
+        // Anything pending during a crash is considered failed/not-executed.
+        for (_, state) in loaded.iter_mut() {
+            if !state.pending_volume_usd.is_zero() {
+                tracing::warn!("Resetting zombie pending volume of ${} for user", state.pending_volume_usd);
+                state.pending_volume_usd = Decimal::ZERO;
+            }
+        }
+
         self.state = loaded;
         self.last_load_time = Some(Utc::now());
         Ok(())

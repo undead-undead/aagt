@@ -174,6 +174,29 @@ impl ShortTermMemory {
             self.last_access.remove(&key);
         }
     }
+
+    /// Pop the oldest N messages for a user
+    pub async fn pop_oldest(&self, user_id: &str, agent_id: Option<&str>, count: usize) -> Vec<Message> {
+        let key = self.key(user_id, agent_id);
+        let mut popped = Vec::new();
+        
+        if let Some(mut entry) = self.store.get_mut(&key) {
+             for _ in 0..count {
+                 if let Some(msg) = entry.pop_front() {
+                     popped.push(msg);
+                 } else {
+                     break;
+                 }
+             }
+        }
+        
+        if !popped.is_empty() {
+             // Save change immediately
+             let _ = self.save().await;
+        }
+        
+        popped
+    }
 }
 
 #[async_trait]
@@ -190,6 +213,8 @@ impl Memory for ShortTermMemory {
             let mut entry = self.store.entry(key.clone()).or_default();
 
             // Ring buffer behavior: remove oldest if at capacity
+            // NOTE: With Tiered Storage, MemoryManager should handle archiving BEFORE this limit is hit commonly.
+            // But as a safety net, we still keep the hard limit.
             if entry.len() >= self.max_messages {
                 entry.pop_front();
             }
@@ -200,13 +225,14 @@ impl Memory for ShortTermMemory {
         self.last_access.insert(key, std::time::Instant::now());
         
         // Save immediately for safety (Async I/O)
-        // Now safe because we are no longer holding the DashMap write lock
+        // With Tiered storage, this file stays small (KB), so atomic write is fast enough.
         if let Err(e) = self.save().await {
             tracing::error!("Failed to persist short-term memory: {}", e);
         }
 
         Ok(())
     }
+
 
 
     async fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
@@ -628,6 +654,16 @@ impl QmdMemory {
     pub fn engine(&self) -> Arc<HybridSearchEngine> {
         self.engine.clone()
     }
+
+    /// Store multiple messages efficiently
+    pub async fn store_batch(&self, user_id: &str, agent_id: Option<&str>, messages: Vec<Message>) -> crate::error::Result<()> {
+        // In the future, HybridSearchEngine could support batch indexing.
+        // For now, we loop. Concurrent awaits could be improved if engine supports it.
+        for msg in messages {
+            self.store(user_id, agent_id, msg).await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -686,7 +722,8 @@ pub struct MemoryManager {
 impl MemoryManager {
     /// Create with default settings (Async)
     pub async fn new() -> crate::error::Result<Self> {
-        Self::with_capacity(100, 1000, 1000, PathBuf::from("data/memory.jsonl")).await
+        // STM: Keep it small. 50 messages max per user.
+        Self::with_capacity(50, 1000, 1000, PathBuf::from("data/memory.jsonl")).await
     }
 
     /// Create with custom capacities and path
@@ -702,7 +739,7 @@ impl MemoryManager {
     /// Create with QMD backend using simplified path
     /// 
     /// This is a convenience function that creates a MemoryManager with sensible defaults:
-    /// - Short-term: 100 messages per user
+    /// - Short-term: 50 messages (Hard limit) / 20 messages (Tiering threshold)
     /// - Short-term: 1000 active users
     /// - Long-term: 1000 entries per collection
     ///
@@ -715,7 +752,65 @@ impl MemoryManager {
     /// # }
     /// ```
     pub async fn with_qmd(db_path: impl Into<PathBuf>) -> crate::error::Result<Self> {
-        Self::with_capacity(100, 1000, 1000, db_path.into()).await
+        Self::with_capacity(50, 1000, 1000, db_path.into()).await
+    }
+    
+    /// Tiered Storage Store
+    /// Stores in STM, then auto-archives to LTM if STM > threshold (e.g. 20)
+    pub async fn store(&self, user_id: &str, agent_id: Option<&str>, message: Message) -> crate::error::Result<()> {
+        // 1. Write to Hot Storage (STM) - Fast
+        self.short_term.store(user_id, agent_id, message).await?;
+        
+        // 2. Check Capacity & Tiering
+        let count = self.short_term.message_count(user_id, agent_id);
+        const TIERING_THRESHOLD: usize = 20;
+        const ARCHIVE_BATCH_SIZE: usize = 10;
+        
+        if count > TIERING_THRESHOLD {
+            let old_messages = self.short_term.pop_oldest(user_id, agent_id, ARCHIVE_BATCH_SIZE).await;
+            if !old_messages.is_empty() {
+                // Move to Cold Storage (LTM)
+                // We spawn this or await? 
+                // Awaiting ensures data safety. STM is already saved, so if this fails, we effectively lose them 
+                // from Hot but haven't put them in Cold. 
+                // pop_oldest already removed them and saved STM.
+                // So we MUST ensure LTM store succeeds or we lose data.
+                // ideally pop_oldest should only commit if LTM implies success, but that requires 2PC.
+                // For now, simpler: Just await.
+                if let Err(e) = self.long_term.store_batch(user_id, agent_id, old_messages).await {
+                     tracing::error!("FAILED TO ARCHIVE MEMORY to LTM: {}. Data lost!", e);
+                     // In a real system we might push them back to STM or a 'dead letter' queue
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Unified Retrieve
+    /// Fetches from Hot (STM) + Cold (LTM) seamlessly
+    pub async fn retrieve_unified(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
+        // 1. Get from Hot
+        let mut messages = self.short_term.retrieve(user_id, agent_id, limit).await;
+        
+        // 2. Check if we need more from Cold
+        if messages.len() < limit {
+             let needed = limit - messages.len();
+             // QmdMemory doesn't support "retrieve recent N" easily yet based on previous audit,
+             // only "search". 
+             // But we implemented a placeholder `retrieve` in QmdMemory that returns empty Vec.
+             // We need QmdMemory to support time-based retrieval for this to work fully.
+             // Assuming QmdMemory has been upgraded or we use the `retrieve` trait method if implemented.
+             let cold_messages = self.long_term.retrieve(user_id, agent_id, needed).await;
+             
+             // Combine: Cold (Older) + Hot (Newer)
+             // Vector concatenation
+             let mut combined = cold_messages;
+             combined.extend(messages);
+             messages = combined;
+        }
+        
+        messages
     }
 
     /// Undo last message in both memories

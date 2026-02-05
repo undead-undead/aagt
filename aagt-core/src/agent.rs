@@ -34,6 +34,8 @@ pub struct AgentConfig {
     pub max_history_messages: usize,
     /// Max characters allowed in tool output before truncation
     pub max_tool_output_chars: usize,
+    /// Enable strict JSON mode (response_format: json_object)
+    pub json_mode: bool,
 }
 
 impl Default for AgentConfig {
@@ -48,6 +50,7 @@ impl Default for AgentConfig {
             tool_policy: RiskyToolPolicy::default(),
             max_history_messages: 20,
             max_tool_output_chars: 4096,
+            json_mode: false,
         }
     }
 }
@@ -398,6 +401,17 @@ impl<P: Provider> Agent<P> {
 
     /// Stream a chat response
     pub async fn stream_chat(&self, messages: Vec<Message>) -> Result<StreamingResponse> {
+        let mut extra = self.config.extra_params.clone().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        
+        // Inject JSON mode if enabled
+        if self.config.json_mode {
+            if let serde_json::Value::Object(ref mut map) = extra {
+                if !map.contains_key("response_format") {
+                     map.insert("response_format".to_string(), serde_json::json!({ "type": "json_object" }));
+                }
+            }
+        }
+
         self.provider
             .stream_completion(
                 &self.config.model,
@@ -406,7 +420,7 @@ impl<P: Provider> Agent<P> {
                 self.tools.definitions().await,
                 self.config.temperature,
                 self.config.max_tokens,
-                self.config.extra_params.clone(),
+                Some(extra),
             )
             .await
     }
@@ -559,6 +573,12 @@ impl<P: Provider> AgentBuilder<P> {
     /// Set max tool output characters
     pub fn max_tool_output_chars(mut self, count: usize) -> Self {
         self.config.max_tool_output_chars = count;
+        self
+    }
+
+    /// Enable strict JSON mode (enforces response_format: json_object)
+    pub fn json_mode(mut self, enable: bool) -> Self {
+        self.config.json_mode = enable;
         self
     }
     

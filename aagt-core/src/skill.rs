@@ -147,7 +147,7 @@ impl Tool for DynamicSkill {
             return Ok(result);
         }
 
-        // --- Legacy Script Runtime Support ---
+        // --- Sandbox / Legacy Script Runtime Support ---
         let interpreter = match runtime_type {
             "python" | "python3" => "python3",
             "bash" | "sh" => "bash",
@@ -169,9 +169,52 @@ impl Tool for DynamicSkill {
              ).into());
         }
         
-        info!(tool = %self.name(), "Executing dynamic skill");
+        info!(tool = %self.name(), "Executing dynamic skill (Runtime: {})", runtime_type);
 
-        let mut cmd = tokio::process::Command::new(interpreter);
+        // Check for Bubblewrap (bwrap)
+        let has_bwrap = which::which("bwrap").is_ok();
+        let use_sandbox = has_bwrap;
+        
+        // Strict Mode Enforcement
+        if !self.execution_config.allow_network && !has_bwrap {
+             return Err(Error::tool_execution(
+                 self.name(), 
+                 "Security Error: Network access is disabled (allow_network=false), but 'bwrap' sandbox is not installed on the system. Cannot execute securely."
+             ).into());
+        }
+
+        let mut cmd = if use_sandbox {
+            let mut c = tokio::process::Command::new("bwrap");
+            
+            // 1. Root is read-only
+            c.arg("--ro-bind").arg("/").arg("/");
+            
+            // 2. Devices
+            c.arg("--dev").arg("/dev");
+            c.arg("--proc").arg("/proc");
+            
+            // 3. Private /tmp
+            c.arg("--tmpfs").arg("/tmp");
+            
+            // 4. Bind current directory (so script can be read/write in project)
+            if let Ok(cwd) = std::env::current_dir() {
+                c.arg("--bind").arg(&cwd).arg(&cwd);
+            }
+            
+            // 5. Network Isolation
+            if !self.execution_config.allow_network {
+                c.arg("--unshare-net");
+            }
+            
+            // 6. The actual command
+            c.arg(interpreter);
+            c
+        } else {
+            warn!("Executing WITHOUT SANDBOX (allow_network=true and bwrap missing).");
+            tokio::process::Command::new(interpreter)
+        };
+
+        // Add script path
         cmd.arg(&script_full_path);
         
         // Pass arguments as JSON string
@@ -256,8 +299,15 @@ impl Tool for DynamicSkill {
                              let pipeline_ctx = crate::pipeline::Context::new(format!("Skill execution: {}", self.name()));
                              // We could pass more context if needed
                              
-                             let result = executor.execute(&action, &pipeline_ctx).await
-                                .map_err(|e| Error::tool_execution(self.name(), format!("Execution Failed: {}", e)))?;
+                             let result = match executor.execute(&action, &pipeline_ctx).await {
+                                Ok(res) => res,
+                                Err(e) => {
+                                    // Fix #2.2: Rollback on Execution Failure
+                                    warn!("Skill execution failed, rolling back risk reservation: {}", e);
+                                    rm.rollback_trade(&context.user_id, context.amount_usd).await;
+                                    return Err(Error::tool_execution(self.name(), format!("Execution Failed (Rolled Back): {}", e)).into());
+                                }
+                             };
                                 
                              // Once executed success, we confirm the trade to RiskManager (commit)
                              rm.commit_trade(&context.user_id, context.amount_usd).await?;

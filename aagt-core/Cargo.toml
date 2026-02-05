@@ -40,6 +40,8 @@ tonic = { workspace = true }
 prost = { workspace = true }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
+which = "8.0.0"
+tiktoken-rs = "0.9.1"
 
 [build-dependencies]
 tonic-build = { workspace = true }

@@ -48,7 +48,7 @@ pub mod prelude {
     pub use crate::message::{Content, Message, Role, ToolCall};
     pub use crate::multi_agent::{AgentRole, Coordinator, MultiAgent};
     pub use crate::notification::{Notifier, NotifyChannel};
-    pub use crate::provider::Provider;
+    pub use crate::provider::{CircuitBreakerConfig, Provider, ResilientProvider};
     pub use crate::risk::{
         RiskCheck, RiskCheckBuilder, RiskCheckResult, RiskConfig, RiskManager, TradeContext,
     };

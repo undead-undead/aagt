@@ -77,7 +77,15 @@ struct ChatRequest {
     max_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAITool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
     stream: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ResponseFormat {
+    #[serde(rename = "type")]
+    format_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -289,14 +297,26 @@ impl Provider for OpenAI {
         tools: Vec<ToolDefinition>,
         temperature: Option<f64>,
         max_tokens: Option<u64>,
-        _extra_params: Option<serde_json::Value>,
+        extra_params: Option<serde_json::Value>,
     ) -> Result<StreamingResponse> {
+        // Check for response_format in extra_params
+        let response_format = if let Some(params) = &extra_params {
+            if let Some(format_val) = params.get("response_format") {
+                 serde_json::from_value(format_val.clone()).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let request = ChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages(system_prompt, messages),
             temperature,
             max_tokens,
             tools: Self::convert_tools(tools),
+            response_format,
             stream: true,
         };
 
