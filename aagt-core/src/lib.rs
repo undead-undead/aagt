@@ -39,7 +39,7 @@ pub mod prelude {
     pub use crate::agent::{Agent, AgentBuilder, AgentConfig};
     pub use crate::error::{Error, Result};
     pub use crate::maintenance::{MaintenanceConfig, MaintenanceManager};
-    pub use crate::memory::{LongTermMemory, Memory, MemoryManager, ShortTermMemory};
+    pub use crate::memory::{LongTermMemory, Memory, MemoryManager, QmdMemory, ShortTermMemory};
     pub use crate::message::{Content, Message, Role, ToolCall};
     pub use crate::multi_agent::{AgentRole, Coordinator, MultiAgent};
     pub use crate::notification::{Notifier, NotifyChannel};

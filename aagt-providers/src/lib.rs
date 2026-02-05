@@ -34,6 +34,15 @@ pub mod openrouter;
 #[cfg(feature = "moonshot")]
 pub mod moonshot;
 
+#[cfg(feature = "groq")]
+pub mod groq;
+
+#[cfg(feature = "ollama")]
+pub mod ollama;
+
+#[cfg(test)]
+mod provider_tests;
+
 /// HTTP client configuration
 #[derive(Clone)]
 pub struct HttpConfig {

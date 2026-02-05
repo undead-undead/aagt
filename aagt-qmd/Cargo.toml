@@ -1,0 +1,75 @@
+[package]
+name = "aagt-qmd"
+version = "0.1.0"
+edition = "2021"
+authors = ["AAGT Team"]
+description = "QMD-inspired hybrid search engine for AAGT - SQLite FTS5 + Vector + Content-Addressable Storage"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core async runtime
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# SQLite with FTS5
+rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Hashing (content-addressable storage)
+sha2 = "0.10"
+hex = "0.4"
+ureq = "=2.10.1" # Force ureq v2 to fix ort-sys build failure
+
+# Date/Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Glob patterns
+glob = "0.3"
+
+# Vector operations (Phase 2)
+# ndarray is used effectively by fastembed but we don't need it explicitly if we use fastembed's API directly?
+# fastembed re-exports or uses internal types.
+# But vector_store uses Vec<f32>.
+
+# Embedding library (Phase 2 - Candle)
+candle-core = { version = "0.8", features = [], optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+tokenizers = { version = "0.19", features = ["onig"], optional = true }  # Tokenizers needed for candle
+
+# HNSW vector index (Phase 2)
+hnsw_rs = { version = "0.3", optional = true }
+
+# Bincode for vector serialization
+bincode = { version = "1.3", optional = true }
+
+
+
+
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio-test = "0.4"
+tracing-subscriber = "0.3"
+
+[features]
+default = ["fts"]
+fts = []  # FTS5 full-text search (enabled by default)
+vector = ["tokenizers", "hnsw_rs", "bincode", "candle-core", "candle-nn", "candle-transformers"]  # Phase 2: Vector similarity search
+# embeddings = ["candle-core", "candle-nn", "candle-transformers", "tokenizers"]  # Alternative: Pure Rust embeddings (Unused)
+full = ["fts", "vector"]  # All features (FTS + Vector)
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal"]

@@ -8,7 +8,8 @@ use crate::error::{Error, Result};
 use crate::message::{Content, Message, Role};
 use crate::provider::Provider;
 use crate::streaming::StreamingResponse;
-use crate::tool::{Tool, ToolSet};
+use crate::tool::{Tool, ToolSet, memory::{SearchHistoryTool, RememberThisTool}};
+use crate::memory::MemoryManager;
 
 /// Configuration for an Agent
 #[derive(Debug, Clone)]
@@ -575,6 +576,17 @@ impl<P: Provider> AgentBuilder<P> {
         for (_, tool) in tools.iter() {
             self.tools.add_shared(Arc::clone(tool));
         }
+        self
+    }
+
+    /// Add memory tools using the provided memory manager
+    pub fn with_memory(mut self, memory: Arc<MemoryManager>) -> Self {
+        let engine = memory.long_term.engine();
+        
+        // 1. Add tools to the agent
+        self.tools.add(SearchHistoryTool::new(engine.clone()));
+        self.tools.add(RememberThisTool::new(engine.clone()));
+        
         self
     }
 

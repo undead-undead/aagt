@@ -9,13 +9,15 @@ readme = "../README.md"
 
 [features]
 default = ["full"]
-full = ["openai", "anthropic", "gemini", "deepseek", "openrouter", "moonshot"]
+full = ["openai", "anthropic", "gemini", "deepseek", "openrouter", "moonshot", "groq", "ollama"]
 openai = []
 anthropic = []
 gemini = []
 deepseek = ["openai"]
 openrouter = ["openai"]
 moonshot = ["openai"]
+groq = ["openai"]
+ollama = ["openai"]
 
 
 [dependencies]

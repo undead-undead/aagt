@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "aagt-core",
     "aagt-macros", 
-    "aagt-providers",
+    "aagt-providers", "aagt-qmd",
 ]
 
 [workspace.package]
@@ -19,6 +19,8 @@ categories = ["science", "simulation", "asynchronous"]
 aagt-core = { path = "aagt-core", version = "0.1.3" }
 aagt-macros = { path = "aagt-macros", version = "0.1.3" }
 aagt-providers = { path = "aagt-providers", version = "0.1.3" }
+aagt-qmd = { path = "aagt-qmd", version = "0.1.0", default-features = false, features = ["fts"] }
+
 
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }

@@ -24,5 +24,8 @@ logs/
 *.json
 *.jsonl
 *.index
+*.db
+*.db-shm
+*.db-wal
 data/
 !Cargo.json # If any config json exists, but usually not
