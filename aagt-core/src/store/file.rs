@@ -296,17 +296,24 @@ impl FileStore {
         let indices = Arc::new(RwLock::new(Vec::new()));
         
         // Initialize reader (create file if not exists)
-        if !config.path.exists() {
-            if let Some(parent) = config.path.parent() {
-                fs::create_dir_all(parent).await.ok();
+        // Fix #1: Use spawn_blocking for blocking I/O
+        let path = config.path.clone();
+        tokio::task::spawn_blocking(move || {
+            if !path.exists() {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                std::fs::File::create(&path).ok();
             }
-            fs::File::create(&config.path).await.ok();
-        }
+        }).await.map_err(|e| Error::Internal(format!("Join error: {}", e)))?;
 
-        let reader = std::fs::OpenOptions::new()
-            .read(true)
-            .open(&config.path)
-            .map_err(|e| Error::MemoryStorage(format!("Failed to open read handle at {:?}: {}", config.path, e)))?;
+        let path = config.path.clone();
+        let reader = tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .map_err(|e| Error::MemoryStorage(format!("Failed to open read handle at {:?}: {}", path, e)))
+        }).await.map_err(|e| Error::Internal(format!("Join error: {}", e)))??;
 
         // Spawn Actor for writes
         let (tx, rx) = mpsc::channel(100);

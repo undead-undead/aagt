@@ -16,6 +16,8 @@
 #![warn(missing_docs)]
 
 pub mod agent;
+pub mod capabilities;
+pub mod context;
 pub mod error;
 pub mod logging;
 pub mod maintenance;
@@ -34,9 +36,12 @@ pub mod strategy;
 pub mod streaming;
 pub mod tool;
 
+pub use anyhow;
+
 /// Prelude - commonly used types
 pub mod prelude {
     pub use crate::agent::{Agent, AgentBuilder, AgentConfig};
+    pub use crate::context::{ContextConfig, ContextManager};
     pub use crate::error::{Error, Result};
     pub use crate::maintenance::{MaintenanceConfig, MaintenanceManager};
     pub use crate::memory::{LongTermMemory, Memory, MemoryManager, QmdMemory, ShortTermMemory};

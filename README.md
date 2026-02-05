@@ -1,87 +1,86 @@
 # AAGT: Advanced Agentic Trading Framework
 
-A high-performance, production-ready Rust framework for building autonomous trading agents with advanced memory, risk management, and multi-provider support.
+> **The Rust-powered Hybrid Intelligence System for Autonomous Trading.**
+
+AAGT is a high-performance, production-ready framework designed to solve the "Dynamic-Static Conflict" in AI Agents. It combines Rust's uncompromising safety and performance with Python's rich AI ecosystem and WASM's dynamic agility.
 
 ---
 
-## System Architecture
+## System Architecture: The Triple-Core Engine
 
-AAGT is built on a modular "Brain-Body-Nervous System" architecture designed for high reliability and multi-tenant security.
+AAGT is built on a modular "Triple-Core" architecture designed for high reliability, intelligence, and extreme extensibility.
 
-### 1. The Brain (Agent & Provider System)
-- **Pluggable Intelligence**: Native support for **8 providers** via a unified `Provider` trait:
-  - **Cloud**: OpenAI, Anthropic, Gemini, DeepSeek 🇨🇳, Moonshot 🇨🇳, OpenRouter
-  - **Groq** ⚡ - Ultra-fast inference (0.5s response) for real-time trading decisions
-  - **Ollama** 🔐 - Local execution for complete privacy and zero API costs
-- **Quota Protection**: Built-in fuses (`max_history_messages`, `max_tool_output_chars`) to prevent token bloat and control costs.
-- **Context Management**: Advanced sliding window history management to keep reasoning sharp and cost-effective.
+### 1. The Guard (Rust Core) | *The Body*
+Rust's type-safety and ownership model provide the foundation for execution and safety.
+- **High-Performance**: Zero-cost abstractions and async-first design (Tokio) for low-latency decision making.
+- **Risk Management**: Pluggable safety checks (RiskManager) with native code execution.
+- **Context Management**: Advanced sliding window history management (ContextManager) to optimize reasoning and costs.
 
-### 2. The Memory (Dual-Layer Persistence)
-- **Context Layer (Short-Term)**: **RAM + Atomic JSON** - Fault-tolerant conversational state:
-  - **Microsecond Access**: In-memory `DashMap` storage for zero-latency dialogue.
-  - **Crash Safety**: Atomic write-and-rename strategy guarantees zero data loss on power failure.
-  - **Auto-Recovery**: Instantly restores active sessions upon restart.
-- **Knowledge Layer (Long-Term)**: **aagt-qmd** - High-performance hybrid search engine:
-  - **100x faster search** (5ms vs 500ms for 100K documents)
-  - **BM25 + Vector** hybrid retrieval (SQLite FTS5 + optional HNSW)
-  - **25% storage savings** via content-addressable deduplication
-  - **Token Efficient**: Replaces massive context windows with precise, relevance-based retrieval (~90% token savings).
-  - **Zero cloud dependencies** - runs completely locally.
-- **Isolation Engine**: Strict logical and physical data separation between different User IDs and Agent IDs.
-- **Memory Tools**: Agents can actively `search_history` and `remember_this` for autonomous knowledge management.
+### 2. The Thinker (Python gRPC Sidecar) | *The Brain*
+Offload intelligence to where it belongs—the world's most mature AI ecosystem.
+- **Stateful Code Interpreter**: Integrated Jupyter ipykernel allows the agent to maintain variables and state across multiple execution cells.
+- **Ecosystem Integration**: Seamless access to LangChain, NumPy, Pandas, and professional quantitative libraries via gRPC.
+- **Zero-Block Execution**: Ensures heavy ML reasoning doesn't block the critical trading execution loop.
 
-### 3. The Guardrails (Risk & Policy)
-- **Risk Management**: Pluggable safety checks (Transaction limits, Volume caps, Honeypot detection).
-- **Tool Policies**: Fine-grained execution control (Auto-run vs. Requires-Human-Approval).
-- **Safety**: Built on Rust's type-safety and ownership model to prevent common concurrency bugs in high-frequency trading.
-
-### 4. Integration & Automation
-- **Strategy Pipeline**: Decoupled Detection -> Analysis -> Execution workflow.
-- **Skill System**: Expand agent capabilities via simple Rust functions using the `#[tool]` macro.
-- **Notification Bus**: Real-time alerts via Telegram, Discord, and Webhooks.
+### 3. The Runner (WASM Runtime) | *The Reflex*
+True dynamic extensibility without recompilation.
+- **Hot-Pluggable Skills**: Write skills in any language (Rust, AssemblyScript, C++) and load them as .wasm files.
+- **Sandboxed Security**: Third-party plugins run in a strictly isolated WASI environment with zero access to the host private keys or sensitive OS resources.
 
 ---
 
-## Documentation & API
+## Memory System (aagt-qmd)
 
-AAGT follows a strictly decoupled design. For detailed information on specific interfaces, methods, and configurations, please refer to our comprehensive API documentation:
-
-**[Download / View API Reference (API_REFERENCE.md)](./API_REFERENCE.md)**
-
-### Key API Sections inside the Reference:
-- **[Core Agent API](./API_REFERENCE.md#1-core-module-aagt-core)**: Building and running agents.
-- **[Memory & Persistence](./API_REFERENCE.md#2-memory-module)**: Managing state and long-term knowledge.
-- **[Risk Control](./API_REFERENCE.md#5-risk-management-riskmanager)**: Implementing trading safety checks.
-- **[Multi-Agent Coordination](./API_REFERENCE.md#7-multi-agent-system)**: Orchestrating multiple expert agents.
+AAGT features a **Content-Addressable Hybrid Search** engine for deep historical reasoning:
+- **Dual-Layer Persistence**: 
+  - **Short-Term**: Atomic JSON (Temp-then-Replace) for microsecond session recovery.
+  - **Long-Term**: aagt-qmd Hybrid Search (BM25 + Vector) for token-efficient RAG (~90% savings).
+- **100x Faster Retrieval**: SQLite FTS5 backend ensures 5ms searches even with 100K+ historical documents.
+- **Privacy First**: Zero cloud dependencies. Your strategies and history stay on your infrastructure.
 
 ---
 
-## Getting Started
+## Guardrails & Security
+
+AAGT is "Safe-by-Design":
+- **Risk Checks**: Built-in SingleTradeLimit, DailyVolumeLimit, HoneypotDetection, and SlippageCheck.
+- **Approval Policies**: Fine-grained control with Auto-Run vs Human-in-the-Loop (via Telegram/Discord/Webhooks).
+- **Isolation**: Physical and logical data separation between different User IDs and Agent IDs.
+
+---
+
+## Multi-Provider Support
+
+Native support for LLMs via a unified Provider trait:
+- **Cloud**: OpenAI, Anthropic (Claude), Gemini.
+- **Fast Inference**: Groq (0.5s decision time).
+- **Privacy & Local**: Ollama.
+- **Open Standards**: OpenRouter, DeepSeek, Moonshot.
+
+---
+
+##  Quick Start
 
 ```rust
 use aagt_core::prelude::*;
 use aagt_providers::openai::OpenAI;
-use std::sync::Arc;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    // 1. Create a Provider
+async fn main() -> anyhow::Result<()> {
+    // 1. Initialize Intelligence
     let provider = OpenAI::from_env()?;
 
-    // 2. Setup Memory (backed by aagt-qmd hybrid search)
-    let memory = Arc::new(MemoryManager::with_qmd("data/memory").await?);
-
-    // 3. Build an Agent with Memory & Quota Protection
+    // 2. Build Agent with Hybrid Capabilities
     let agent = Agent::builder(provider)
         .model("gpt-4o")
-        .system_prompt("You are a expert Solana trader.")
-        .max_history_messages(10)
-        .with_memory(memory)  // Adds hybrid search memory
+        .with_code_interpreter()      // Stateful Python sidecar
+        .with_wasm_skills("skills/")  // WASM hot-swappable plugins
+        .with_memory_path("data/")    // Hybrid search RAG
         .build()?;
 
-    // 4. Start Chatting - Agent can now search history and save memories
-    let response = agent.prompt("Check SOL price and analyze the trend.").await?;
-    println!("Agent: {}", response);
+    // 3. Start Secure Execution
+    let response = agent.prompt("Analyze SOL/USDT market depth and plot a 14-day RSI.").await?;
+    println!("Agent Analysis: {}", response);
 
     Ok(())
 }
@@ -89,21 +88,10 @@ async fn main() -> Result<()> {
 
 ---
 
-## Support the Project
+## Support & License
+- **License**: MIT / Apache 2.0
+- **Donate**: 
+  - **Solana**: `9QFKQ3jpBSuNPLZQH1uq5GrJm4RDKue82zeVaXwazcmj`
+  - **Base**: `0x4cf0b79aea1c229dfb1df9e2b40ea5dd04f37969`
 
-If you find AAGT useful, consider supporting the developers:
-
-**Buy Me a Coffee**: https://buymeacoffee.com/undeadundead
-
-**Crypto Donations**:
-- **Solana**: `9QFKQ3jpBSuNPLZQH1uq5GrJm4RDKue82zeVaXwazcmj`
-- **Base**: `0x4cf0b79aea1c229dfb1df9e2b40ea5dd04f37969`
-
----
-
-## License
-MIT / Apache 2.0
-
----
-
-**Built with Rust | Production-Ready v0.1.3**
+**Built by Traders, for Developers.**

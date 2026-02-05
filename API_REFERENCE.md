@@ -1,184 +1,96 @@
 # AAGT API Reference
 
-This document provides a comprehensive overview of the public interfaces and APIs within the AAGT (Advanced Agentic Trading) framework.
+AAGT (Advanced Agentic Trading) is organized into logical layers, balancing core stability with dynamic extension capabilities.
 
 ---
 
-## 1. Core Module (`aagt-core`)
+## Layer 1: Core Intelligence (aagt-core)
+The primarily interface for building and running AI Agents.
 
-### Agent System
-The central entry point for creating and interacting with AI agents.
+### AgentBuilder<P>
+Fluent interface for agent construction.
+- new(provider: P): Start a builder.
+- model(name) / system_prompt(text) / temperature(f64) / max_tokens(u64).
+- max_history_messages(n): Sets the sliding window size.
+- with_code_interpreter(): [NEW] Attaches the Python Sidecar capability.
+- with_memory_path(path): Connects the aagt-qmd hybrid search engine.
+- tool(T): Add a Rust-native tool (Skill).
+- approval_handler(H) / notifier(N).
 
-#### `AgentBuilder<P>`
-Used to configure and construct an `Agent`.
-- `new(provider: P)`: Initialize a new builder with a specific LLM provider.
-- `model(name: String)`: Set the model ID (e.g., "gpt-4o", "claude-3-5-sonnet").
-- `system_prompt(text: String)`: Set the base system instructions (Preamble).
-- `temperature(value: f64)`: Set sampling temperature (0.0 - 1.0).
-- `max_tokens(n: u64)`: Set response token limit.
-- `max_history_messages(n: usize)`: Set the sliding window for conversation history.
-- `max_tool_output_chars(n: usize)`: Set the hard limit for tool output length to save tokens.
-- `tool(T)`: Add a tool/skill to the agent.
-- `approval_handler(H)`: Set a handler for human-in-the-loop approvals.
-- `notifier(N)`: Set a notification backend (Telegram, Discord, etc.).
-- `build()`: Construct the `Agent` instance.
-
-#### `Agent<P>`
-The primary interface for execution.
-- `prompt(text: String) -> Result<String>`: Send a single-turn prompt.
-- `chat(messages: Vec<Message>) -> Result<String>`: Continue a conversation.
-- `stream(text: String) -> Result<StreamingResponse>`: Get a streaming response.
-- `undo(user_id, agent_id)`: Roll back the last interaction in memory.
+### Agent<P>
+The central executor.
+- prompt(&self, text) -> anyhow::Result<String>: Send a single prompt.
+- chat(&self, messages: Vec<Message>) -> anyhow::Result<String>: Multi-turn chat.
+- stream(&self, text) -> Result<StreamingResponse>: Real-time token streaming.
+- undo(user_id, agent_id): Roll back the last interaction atomically.
 
 ---
 
-## 2. Memory Module
+## Layer 2: Capability & Extension
+Bridges the Rust core to the external world via gRPC and WASM.
 
-### `Memory` Trait
-The interface for all memory implementations.
-- `store(user_id, agent_id, message)`: Persist a message.
-- `retrieve(user_id, agent_id, limit)`: Fetch recent messages.
-- `clear(user_id, agent_id)`: Wipe conversation history.
-- `undo(user_id, agent_id)`: Remove the last stored message atomically.
+### Sidecar (gRPC Capability)
+Stateful, rich execution in Python.
+- SidecarManager: Manages the lifecycle of the Python ipykernel subprocess.
+- Sidecar::execute(code): Execute Python code and receive stdout, stderr, and images.
 
-#### `ShortTermMemory` (Context Persistence)
-- **Mechanism**: Atomic Rename (Temp-then-Replace) JSON.
-- **Auto-save**: Every write triggers an asynchronous flush to disk.
-- **Isolation**: Physical path-based and Logical ID-based isolation.
+### WasmRuntime (WASM Capability)
+Hot-swappable plugins for dynamic skills.
+- WasmRuntime::new(bytes): Initialize a WASM engine (Wasmtime).
+- WasmRuntime::call(args): Execute guest code in a WASI sandbox.
 
-#### `LongTermMemory` (Knowledge Base)
-- **Mechanism**: Append-only JSONL with vector-like metadata search.
-- **`store_entry(MemoryEntry)`**: Store a specific knowledge point or fact.
-- **`retrieve_recent(user_id, agent_id, char_limit)`**: Optimized RAG retrieval.
-- **`prune(limit, user_id)`**: Logic to maintain storage size constraints.
-
-#### `QmdMemory` (Hybrid Search Memory) ⚡
-- **Mechanism**: SQLite FTS5 (BM25) + Optional Vector Search (HNSW).
-- **Performance**: 100x faster than linear scan (5ms vs 500ms for 100K docs).
-- **Features**:
-  - Content-addressable storage (automatic deduplication)
-  - Full-text search with BM25 ranking
-  - Optional vector similarity search
-  - Zero cloud dependencies
-- **`new(max_entries, path)`**: Create with database path.
-- **`engine()`**: Access the underlying `HybridSearchEngine` for direct queries.
-
-#### `MemoryManager`
-Combines short-term and long-term memory.
-- **`new()`**: Create with default settings (uses `QmdMemory` backend).
-- **`with_qmd(path)`**: Initialize with a specific storage path (Best for production).
-- **`with_capacity(short_max, users, long_max, path)`**: Full custom configuration.
-- **Usage**:
-  ```rust
-  let memory = Arc::new(MemoryManager::new().await?);
-  let agent = Agent::builder(provider)
-      .with_memory(memory)  // Adds search_history & remember_this tools
-      .build()?;
-  ```
-
-#### Memory Tools (Require `with_memory()`)
-- **`search_history`**: Agent can search past conversations and knowledge
-  - Parameters: `query` (string), `limit` (integer, default: 5)
-  - Returns: BM25-ranked results with snippets
-- **`remember_this`**: Agent can save important insights to long-term memory
-  - Parameters: `title` (string), `content` (string), `collection` (string, optional)
-  - Returns: Confirmation of save
+### DynamicSkill
+Universal wrapper for python3, node, bash, and wasm skill types.
 
 ---
 
-## 3. Providers (`aagt-providers`)
+## Layer 3: State & Memory
+Managing short-term context and long-term knowledge.
 
-AAGT supports multiple LLM providers through a unified interface.
+### ContextManager
+Gatekeeper for the LLM context window.
+- build_context(history): Applies RAG, windowing, and ContextInjector data.
 
-| Provider | Model Constants | Features |
-| :--- | :--- | :--- |
-| **OpenAI** | `GPT_4O`, `GPT_4O_MINI` | Tool calling, Parallel tools |
-| **Anthropic** | `CLAUDE_3_5_SONNET`, `CLAUDE_3_HAIKU` | High reasoning, Tool use |
-| **Gemini** | `GEMINI_2_0_FLASH`, `GEMINI_1_5_PRO` | Deep reasoning, Multimodal |
-| **DeepSeek** | `DEEPSEEK_CHAT`, `DEEPSEEK_CODER` | Efficient trading analysis |
-| **Moonshot** | `MOONSHOT_V1_8K` | Kimi compatibility |
-| **OpenRouter** | Various | Unified routing to 100+ models |
+### MemoryManager
+- with_qmd(path): Initialize with Hybrid Search storage.
+- search_history (Tool): Agent-accessible BM25 history search.
+- remember_this (Tool): Agent-accessible insights persistence.
 
----
-
-## 4. Skills & Tools
-
-### `Tool` Trait
-- `name()`: Identifier for the LLM.
-- `description()`: Instruction for the LLM on when to use it.
-- `definition()`: JSON Schema of parameters.
-- `call(arguments: &str)`: Execute the logic.
-
-### Macros
-- `#[tool]`: Procedural macro to generate a `Tool` from a standard Rust function.
+### aagt-qmd (Hybrid Search Engine)
+- HybridSearchEngine: SQLite FTS5 (BM25) + optional HNSW (Vector).
+- engine.search(query, limit): Unified RRF retrieval.
 
 ---
 
-## 5. Risk Management (`RiskManager`)
+## 🛡️ Layer 4: Guardrails & Strategy (`RiskManager`)
+Ensuring trading safety and automated execution patterns.
 
-Enforces safety and limits on agent actions.
+### `RiskManager`
+The safety filter for every action.
+- `RiskCheck` Trait: `check(context)`, `commit(context)`, `rollback(context)`.
+- **Built-in Checks**: `SingleTradeLimit`, `DailyVolumeLimit`, `TokenSecurity`, `SlippageCheck`.
 
-#### `RiskCheck` Trait
-- `check(context: &TradeContext) -> Result<()>`: Validate an action.
-- `commit(context: &TradeContext)`: Record a successful trade into risk state.
-- `rollback(context: &TradeContext)`: Revert a pending trade state.
-
-#### Built-in Checks
-- `SingleTradeLimit`: Limits USD volume per trade.
-- `DailyVolumeLimit`: Caps total trading volume in 24h.
-- `TokenSecurity`: Blacklists/Whitelists specific tokens.
-- `SlippageCheck`: Prevents execution if expected slippage is too high.
-- `CompositeCheck`: Combines multiple checks into one logical unit.
+### `Strategy` & `Pipeline`
+- `Strategy::new(action, executor)`.
+- `PriceTrigger` / `CronTrigger`.
+- `Pipeline`: Orchestrates Detection ➔ Analysis ➔ Risk Check ➔ Execution.
 
 ---
 
-## 6. Trading Automation
+## 📡 Layer 5: Orchestration & UI
+Multi-agent coordination and event notifications.
 
-### `Strategy`
-A high-level definition of trading logic.
-- `new(action, executor)`: Create a strategy.
-- `PriceTrigger`: Execute when a price crosses a threshold.
-- `CronTrigger`: Execute on a schedule.
+### `Coordinator` (Multi-Agent)
+- `add_agent(role, agent)`.
+- `delegate(target, task)`: Inter-agent task handoff.
+- `broadcast(message)`.
 
-### `Pipeline`
-Orchestrates the flow from Detection -> Analysis -> Risk Check -> Execution.
-- `add_step(step)`: Append a processing step.
-- `run(input)`: Execute the full sequence.
-
----
-
-## 7. Multi-Agent System
-
-### `Coordinator`
-Manages multiple agents working together.
-- `add_agent(role, agent)`: Assign an agent to a specific role.
-- `broadcast(message)`: Send data to all managed agents.
-- `delegate(target, task)`: Assign a sub-task from one agent to another.
-
----
-
-## 8. Notifications & Events
-
-### `Notifier` Trait
-- `notify(channel, message)`: Send a message to the user.
+### `Notifier` & `Events`
 - **Channels**: `Telegram`, `Discord`, `Email`, `Webhook`, `Terminal`.
-
-### `AgentEvent`
-Enum of events emitted via `agent.subscribe()`:
-- `Thinking`: Start of generation.
-- `ToolCall`: Tool usage detected.
-- `ToolResult`: Tool results obtained.
-- `ApprovalPending`: Hitting a `RequiresApproval` policy.
-- `Response`: Final text output.
-- `Error`: Something went wrong.
+- **AgentEvents**: `Thinking`, `ToolCall`, `ApprovalPending`, `Response`, `Error`.
 
 ---
 
-## 9. Simulation & Testing
-
-### `MockProvider`
-A provider that returns predefined responses for testing without API costs.
-
-### `SimulationManager`
-- `start()`: Begin a sandboxed run.
-- `snapshot()`: Take a point-in-time state of the simulation.
+## 🔌 Architecture Specs
+- **Crates**: `aagt-core`, `aagt-qmd`, `aagt-providers`, `aagt-macros`, `aagt-sidecar`.
+- **Patterns**: Strategy (Traits), Builder (Config), Facade (Agent), Bridge (gRPC).

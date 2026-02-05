@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 
+pub mod code_interpreter;
 pub mod memory;
 
 pub use memory::{RememberThisTool, SearchHistoryTool};
@@ -35,7 +36,7 @@ pub trait Tool: Send + Sync {
     async fn definition(&self) -> ToolDefinition;
 
     /// Execute the tool with the given arguments (JSON string)
-    async fn call(&self, arguments: &str) -> Result<String>;
+    async fn call(&self, arguments: &str) -> anyhow::Result<String>;
 }
 
 /// A collection of tools available to an agent
@@ -89,7 +90,7 @@ impl ToolSet {
     }
 
     /// Call a tool by name
-    pub async fn call(&self, name: &str, arguments: &str) -> Result<String> {
+    pub async fn call(&self, name: &str, arguments: &str) -> anyhow::Result<String> {
         let tool = self
             .tools
             .get(name)
@@ -189,7 +190,7 @@ macro_rules! simple_tool {
                 }
             }
 
-            async fn call(&self, arguments: &str) -> $crate::error::Result<String> {
+            async fn call(&self, arguments: &str) -> anyhow::Result<String> {
                 let handler = $handler;
                 handler(arguments).await
             }
@@ -228,7 +229,7 @@ mod tests {
             }
         }
 
-        async fn call(&self, arguments: &str) -> Result<String> {
+        async fn call(&self, arguments: &str) -> anyhow::Result<String> {
             #[derive(Deserialize)]
             struct Args {
                 message: String,

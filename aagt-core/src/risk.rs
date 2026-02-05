@@ -279,6 +279,11 @@ impl RiskActor {
 
     /// Stateless validation logic - can be run outside Actor
     fn validate_stateless(config: &RiskConfig, context: &TradeContext, checks: &[Arc<dyn RiskCheck>]) -> Result<()> {
+        // Fix #2: Reject negative or zero amounts (Crucial Security Fix)
+        if context.amount_usd <= Decimal::ZERO {
+             return Err(Error::risk_check_failed("amount_validation", format!("Amount must be positive, got ${:.2}", context.amount_usd)));
+        }
+
         if context.amount_usd > config.max_single_trade_usd {
             return Err(Error::RiskLimitExceeded {
                 limit_type: "single_trade".to_string(),

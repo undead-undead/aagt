@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{info, instrument};
+use anyhow;
 
 use crate::error::{Error, Result};
 use crate::message::{Content, Message, Role};
@@ -10,6 +11,7 @@ use crate::provider::Provider;
 use crate::streaming::StreamingResponse;
 use crate::tool::{Tool, ToolSet, memory::{SearchHistoryTool, RememberThisTool}};
 use crate::memory::MemoryManager;
+use crate::context::{ContextManager, ContextConfig, ContextInjector};
 
 /// Configuration for an Agent
 #[derive(Debug, Clone)]
@@ -102,7 +104,7 @@ pub enum AgentEvent {
 #[async_trait::async_trait]
 pub trait ApprovalHandler: Send + Sync {
     /// Request approval for a tool call
-    async fn approve(&self, tool_name: &str, arguments: &str) -> Result<bool>;
+    async fn approve(&self, tool_name: &str, arguments: &str) -> anyhow::Result<bool>;
 }
 
 /// A default approval handler that rejects all
@@ -110,7 +112,7 @@ pub struct RejectAllApprovalHandler;
 
 #[async_trait::async_trait]
 impl ApprovalHandler for RejectAllApprovalHandler {
-    async fn approve(&self, _tool: &str, _args: &str) -> Result<bool> {
+    async fn approve(&self, _tool: &str, _args: &str) -> anyhow::Result<bool> {
         Ok(false)
     }
 }
@@ -142,7 +144,7 @@ impl ChannelApprovalHandler {
 
 #[async_trait::async_trait]
 impl ApprovalHandler for ChannelApprovalHandler {
-    async fn approve(&self, tool_name: &str, arguments: &str) -> Result<bool> {
+    async fn approve(&self, tool_name: &str, arguments: &str) -> anyhow::Result<bool> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         
         let request = ApprovalRequest {
@@ -156,7 +158,10 @@ impl ApprovalHandler for ChannelApprovalHandler {
             .map_err(|_| Error::Internal("Approval channel closed".to_string()))?;
 
         // Wait for response
-        rx.await.map_err(|_| Error::Internal("Approval responder dropped".to_string()))
+        let approved = rx.await
+            .map_err(|_| Error::Internal("Approval responder dropped".to_string()))?;
+            
+        Ok(approved)
     }
 }
 
@@ -167,6 +172,7 @@ pub struct Agent<P: Provider> {
     provider: Arc<P>,
     tools: ToolSet,
     config: AgentConfig,
+    context_manager: ContextManager,
     events: broadcast::Sender<AgentEvent>,
     approval_handler: Arc<dyn ApprovalHandler>,
     notifier: Option<Arc<dyn Notifier>>,
@@ -234,12 +240,9 @@ impl<P: Provider> Agent<P> {
 
             info!("Agent starting chat completion (step {})", steps);
 
-            // Context Window Management: Only send last N messages to respect quota
-            let context_messages = if messages.len() > self.config.max_history_messages {
-                messages[messages.len() - self.config.max_history_messages..].to_vec()
-            } else {
-                messages.clone()
-            };
+            // Context Window Management via ContextManager
+            let context_messages = self.context_manager.build_context(&messages)
+                .map_err(|e| Error::agent_config(format!("Failed to build context: {}", e)))?;
 
             let stream = self.stream_chat(context_messages).await?;
             
@@ -331,6 +334,7 @@ impl<P: Provider> Agent<P> {
                                         input: args_str.clone() 
                                     });
                                     tools.call(&name_clone, &args_str).await
+                                        .map_err(|e| Error::tool_execution(name_clone.clone(), e.to_string()))
                                 }
                                 Ok(false) => {
                                     Err(Error::ToolApprovalRequired { tool_name: name_clone.clone() })
@@ -345,7 +349,9 @@ impl<P: Provider> Agent<P> {
                                 tool: name_clone.clone(), 
                                 input: args_str.clone() 
                             });
+                            // internal tool call returns anyhow::Result
                             tools.call(&name_clone, &args_str).await
+                                .map_err(|e| Error::tool_execution(name_clone.clone(), e.to_string()))
                         }
                     };
                     
@@ -445,8 +451,9 @@ impl<P: Provider> Agent<P> {
                 self.emit(AgentEvent::ToolResult { tool: name.to_string(), output: output.clone() });
                 Ok(output)
             },
-            Err(ref e) => {
+            Err(e) => {
                 self.emit(AgentEvent::Error { message: e.to_string() });
+                // Map anyhow error to ToolExecution error
                 Err(Error::tool_execution(name.to_string(), e.to_string()))
             }
         }
@@ -478,6 +485,7 @@ pub struct AgentBuilder<P: Provider> {
     provider: P,
     tools: ToolSet,
     config: AgentConfig,
+    injectors: Vec<Box<dyn ContextInjector>>,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
     notifier: Option<Arc<dyn Notifier>>,
 }
@@ -489,6 +497,7 @@ impl<P: Provider> AgentBuilder<P> {
             provider,
             tools: ToolSet::new(),
             config: AgentConfig::default(),
+            injectors: Vec::new(),
             approval_handler: None,
             notifier: None,
         }
@@ -559,6 +568,12 @@ impl<P: Provider> AgentBuilder<P> {
         self
     }
 
+    /// Add a context injector
+    pub fn context_injector(mut self, injector: impl ContextInjector + 'static) -> Self {
+        self.injectors.push(Box::new(injector));
+        self
+    }
+
     /// Add a tool
     pub fn tool<T: Tool + 'static>(mut self, tool: T) -> Self {
         self.tools.add(tool);
@@ -590,6 +605,16 @@ impl<P: Provider> AgentBuilder<P> {
         self
     }
 
+    /// Add code interpreter capability using the given sidecar address
+    pub async fn with_code_interpreter(mut self, address: impl Into<String>) -> Result<Self> {
+        let sidecar = crate::capabilities::Sidecar::connect(address.into()).await?;
+        let shared_sidecar = Arc::new(tokio::sync::Mutex::new(sidecar));
+        
+        self.tools.add(crate::tool::code_interpreter::CodeInterpreter::new(shared_sidecar));
+        
+        Ok(self)
+    }
+
     /// Build the agent
     pub fn build(self) -> Result<Agent<P>> {
         // Validate configuration
@@ -602,10 +627,27 @@ impl<P: Provider> AgentBuilder<P> {
 
         let (tx, _) = broadcast::channel(1000);
 
+        let mut context_config = ContextConfig::default();
+        context_config.max_history_messages = self.config.max_history_messages;
+        if let Some(tokens) = self.config.max_tokens {
+            // Rough heuristic: Context window is usually larger than max_tokens (generation limit)
+            // But we don't have model context window size in config yet.
+            // For now, let's just ensure we respect max_history_messages primarily.
+            context_config.response_reserve = tokens as usize;
+        }
+
+        let mut context_manager = ContextManager::new(context_config);
+        context_manager.set_system_prompt(self.config.preamble.clone());
+        
+        for injector in self.injectors {
+            context_manager.add_injector(injector);
+        }
+
         Ok(Agent {
             provider: Arc::new(self.provider),
             tools: self.tools,
             config: self.config,
+            context_manager,
             events: tx,
             approval_handler: self.approval_handler.unwrap_or_else(|| Arc::new(RejectAllApprovalHandler)),
             notifier: self.notifier,

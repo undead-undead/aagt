@@ -1,5 +1,4 @@
-//! Error types for the aagt framework
-
+use crate::anyhow::Error as AnyhowError;
 use thiserror::Error;
 
 /// Result type alias using aagt's Error
@@ -8,6 +7,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Main error type for the aagt framework
 #[derive(Debug, Error)]
 pub enum Error {
+    // ... (variants) ...
     // ============ Agent Errors ============
     /// Agent is not properly configured
     #[error("Agent configuration error: {0}")]
@@ -157,8 +157,8 @@ pub enum Error {
     Internal(String),
 
     /// Any other error
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    #[error("{0}")]
+    Other(AnyhowError),
 }
 
 impl Error {

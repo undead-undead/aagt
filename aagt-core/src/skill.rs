@@ -1,14 +1,10 @@
-//! Dynamic Skill loading and execution system.
-//! 
-//! This module allows AAGT to load tools at runtime from `.md` files
-//! and execute associated scripts (Python, Node, etc.).
-//! 
-//! Safety is ensured by routing all "proposals" from scripts through
-//! the AAGT `RiskManager`.
+pub mod wasm;
 
+use wasm::WasmRuntime;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -67,6 +63,7 @@ pub struct DynamicSkill {
     risk_manager: Option<Arc<RiskManager>>,
     executor: Option<Arc<dyn ActionExecutor>>,
     execution_config: SkillExecutionConfig,
+    wasm_runtime: Arc<Mutex<Option<WasmRuntime>>>,
 }
 
 impl DynamicSkill {
@@ -79,6 +76,7 @@ impl DynamicSkill {
             risk_manager: None,
             executor: None,
             execution_config: SkillExecutionConfig::default(),
+            wasm_runtime: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -126,94 +124,102 @@ impl Tool for DynamicSkill {
     }
 
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
+        let runtime_type = self.metadata.runtime.as_deref().unwrap_or("python3");
+
+        // --- WASM Runtime Support ---
+        if runtime_type == "wasm" {
+            let mut runtime_guard = self.wasm_runtime.lock().await;
+            if runtime_guard.is_none() {
+                let wasm_file = self.metadata.script.as_ref().ok_or_else(|| {
+                     Error::tool_execution(self.name(), "No wasm file defined for this skill".to_string())
+                })?;
+                let wasm_path = self.base_dir.join("scripts").join(wasm_file);
+                let wasm_bytes = tokio::fs::read(&wasm_path).await
+                    .map_err(|e| Error::tool_execution(self.name(), format!("Failed to read reached wasm file at {:?}: {}", wasm_path, e)))?;
+                
+                *runtime_guard = Some(WasmRuntime::new(&wasm_bytes)?);
+            }
+            
+            info!(tool = %self.name(), "Executing WASM skill");
+            let result = runtime_guard.as_ref().unwrap().call(arguments).await?;
+            return Ok(result);
+        }
+
+        // --- Legacy Script Runtime Support ---
+        let interpreter = match runtime_type {
+            "python" | "python3" => "python3",
+            "bash" | "sh" => "bash",
+            "node" | "js" => "node",
+            lang => lang
+        };
+
         let script_file = self.metadata.script.as_ref().ok_or_else(|| {
-            Error::tool_execution(self.name(), "No script defined for this skill".to_string())
+             Error::tool_execution(self.name(), "No script defined for this skill".to_string())
         })?;
 
         let script_rel_path = Path::new("scripts").join(script_file);
         let script_full_path = self.base_dir.join(&script_rel_path);
 
         if !script_full_path.exists() {
-            return Err(Error::tool_execution(
-                self.name(),
-                format!("Script not found at {:?}", script_full_path),
-            ));
+             return Err(Error::tool_execution(
+                 self.name(),
+                 format!("Script not found at {:?}", script_full_path),
+             ).into());
         }
-
-        let runtime = self.metadata.runtime.as_deref().unwrap_or("python3");
-        info!("Executing dynamic skill {} using {}", self.name(), runtime);
-
-        // Use configured timeout
-        let timeout_duration = std::time::Duration::from_secs(self.execution_config.timeout_secs);
         
-        let mut cmd = tokio::process::Command::new(runtime);
-        cmd.arg(&script_rel_path)
-            .arg(arguments)
-            .current_dir(&self.base_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        info!(tool = %self.name(), "Executing dynamic skill");
 
-        // Apply environment variables from config
+        let mut cmd = tokio::process::Command::new(interpreter);
+        cmd.arg(&script_full_path);
+        
+        // Pass arguments as JSON string
+        cmd.arg(arguments);
+
+        // Capture stdout/stderr
+        cmd.stdout(std::process::Stdio::piped())
+           .stderr(std::process::Stdio::piped());
+           
+        // Environment variables
         for (key, value) in &self.execution_config.env_vars {
             cmd.env(key, value);
         }
 
-        // Restrict network access if configured (Linux-only via basic example)
-        if !self.execution_config.allow_network {
-            // Note: True sandboxing requires container/VM. This is a placeholder.
-            // In production, consider using firejail, nsjail, or containers.
-            cmd.env("NO_PROXY", "*");
-        }
-
-        let child = cmd.spawn()
-            .map_err(|e| Error::tool_execution(self.name(), format!("Failed to spawn process: {}", e)))?;
-
-        // Save process ID before moving child
-        let pid = child.id();
+        // Set timeout
+        let timeout = std::time::Duration::from_secs(self.execution_config.timeout_secs);
         
-        let output_future = child.wait_with_output();
-        let output = match tokio::time::timeout(timeout_duration, output_future).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => {
-                return Err(Error::tool_execution(self.name(), format!("Process failed: {}", e)));
-            }
-            Err(_) => {
-                // Timeout: forcefully kill the process using saved PID
-                warn!("Skill {} timed out after {}s, killing process {}", self.name(), timeout_duration.as_secs(), pid.unwrap_or(0));
-                if let Some(pid) = pid {
-                    // Use system kill command
-                    #[cfg(unix)]
-                    {
-                        use std::process::Command;
-                        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
-                    }
-                }
-                return Err(Error::tool_execution(
-                    self.name(), 
-                    format!("Skill timed out after {}s", timeout_duration.as_secs())
-                ));
-            }
-        };
+        // Execute with timeout
+        let child = cmd.spawn()
+            .map_err(|e| Error::ToolExecution { 
+                tool_name: self.name(), 
+                message: format!("Failed to spawn process: {}", e) 
+            })?;
+
+        let output = tokio::time::timeout(timeout, child.wait_with_output())
+            .await
+            .map_err(|_| Error::ToolExecution { 
+                tool_name: self.name(), 
+                message: "Execution timed out".to_string() 
+            })?
+            .map_err(|e| Error::ToolExecution { 
+                tool_name: self.name(), 
+                message: format!("Process failed: {}", e) 
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("Skill {} script failed: {}", self.name(), stderr);
-            return Err(Error::tool_execution(self.name(), stderr.to_string()));
+            return Err(Error::ToolExecution {
+                tool_name: self.name(),
+                message: format!("Script error (exit code {}): {}\nStderr: {}", 
+                    output.status.code().unwrap_or(-1), stdout, stderr)
+            }.into());
         }
-
-        // Check output size limit
-        if output.stdout.len() > self.execution_config.max_output_bytes {
-            return Err(Error::tool_execution(
-                self.name(),
-                format!("Script output exceeds size limit of {} bytes", self.execution_config.max_output_bytes)
-            ));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        // 🛡️ Safety Check: Parse for Proposals
-        if let Ok(value) = serde_json::from_str::<Value>(&stdout) {
+        
+        // 🛡️ Safety Check: Parse for Proposals (unchanged logic)
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&stdout) {
             if value.get("type").and_then(|t| t.as_str()) == Some("proposal") {
                 if let Some(proposal_data) = value.get("data") {
                     let proposal: Proposal = serde_json::from_value(proposal_data.clone())
@@ -264,7 +270,7 @@ impl Tool for DynamicSkill {
                             return Ok(format!("SIMULATION SUCCESS: Trade approved by risk manager but NO EXECUTOR configured. Proposal: {:?}", proposal));
                         }
                     } else {
-                        return Err(Error::tool_execution(self.name(), "RiskManager not configured, cannot execute risky proposal".to_string()));
+                        return Err(Error::tool_execution(self.name(), "RiskManager not configured, cannot execute risky proposal".to_string()).into());
                     }
                 }
             }

@@ -12,7 +12,7 @@ use crate::error::Result;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-/// Initialize logging with file rotation
+/// Initialize logging with file rotation and optional Tokio Console
 ///
 /// - `directory`: Directory to store logs
 /// - `filename_prefix`: Prefix for log files (e.g. "aagt.log")
@@ -28,13 +28,10 @@ pub fn init_logging(directory: &str, filename_prefix: &str, level: &str) -> Resu
         })?;
 
     // 2. Formatting layers
-    // Console: Human readable
-    let console_layer = fmt::layer()
-        .with_target(false) // meaningful targets are better, but for clean output maybe false
-        .compact();
+    // Stdout: Human readable
+    let stdout_layer = fmt::layer().with_target(false).compact();
 
     // File: JSON for parsing or full text
-    // For lightweight usage, text is often easier to read than JSON. Let's stick to text for now.
     let file_layer = fmt::layer().with_writer(file_appender).with_ansi(false);
 
     // 3. Filter
@@ -42,10 +39,33 @@ pub fn init_logging(directory: &str, filename_prefix: &str, level: &str) -> Resu
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     // 4. Registry
-    tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(filter)
+        .with(stdout_layer)
+        .with(file_layer);
+
+    // 5. Tokio Console (Optional via Feature or Config)
+    // We enable it by default in this refactor to improve Observability.
+    let (console_layer, server) = console_subscriber::ConsoleLayer::builder()
+        .with_default_env()
+        .build();
+
+    // Spawn console server in background
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build console server runtime");
+        
+        runtime.block_on(async move {
+            if let Err(e) = server.serve().await {
+                eprintln!("Console server failed: {}", e);
+            }
+        });
+    });
+
+    registry
         .with(console_layer)
-        .with(file_layer)
         .try_init()
         .map_err(|e| crate::error::Error::Internal(format!("Failed to init tracing: {}", e)))?;
 

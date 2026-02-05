@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package sidecar;
+
+service Sidecar {
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+}
+
+message ExecuteRequest {
+  string code = 1;
+}
+
+message ExecuteResponse {
+  string stdout = 1;
+  string stderr = 2;
+  repeated string images = 3; // Base64 encoded or paths
+}

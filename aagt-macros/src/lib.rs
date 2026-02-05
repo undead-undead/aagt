@@ -143,7 +143,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            async fn call(&self, arguments: &str) -> aagt_core::error::Result<String> {
+            async fn call(&self, arguments: &str) -> aagt_core::anyhow::Result<String> {
                 let args: #args_type = serde_json::from_str(arguments)
                     .map_err(|e| aagt_core::error::Error::ToolArguments {
                         tool_name: #tool_name.to_string(),
@@ -151,6 +151,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                     })?;
 
                 self.execute(args).await
+                    .map_err(|e| e.into())
             }
         }
     };
@@ -228,7 +229,7 @@ pub fn derive_tool(input: TokenStream) -> TokenStream {
                 }
             }
 
-            async fn call(&self, arguments: &str) -> aagt_core::error::Result<String> {
+            async fn call(&self, arguments: &str) -> aagt_core::anyhow::Result<String> {
                 let args: #args_type = serde_json::from_str(arguments)
                     .map_err(|e| aagt_core::error::Error::ToolArguments {
                         tool_name: #name.to_string(),
@@ -236,6 +237,7 @@ pub fn derive_tool(input: TokenStream) -> TokenStream {
                     })?;
 
                 self.execute(args).await
+                    .map_err(|e| e.into())
             }
         }
     };

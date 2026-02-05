@@ -29,3 +29,5 @@ logs/
 *.db-wal
 data/
 !Cargo.json # If any config json exists, but usually not
+bin/
+*.log

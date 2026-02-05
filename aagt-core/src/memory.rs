@@ -648,7 +648,7 @@ impl Memory for QmdMemory {
         Ok(())
     }
 
-    async fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
+    async fn retrieve(&self, _user_id: &str, _agent_id: Option<&str>, _limit: usize) -> Vec<Message> {
         // Since this is generic retrieval without a specific query, 
         // we might just want to list recent documents in the collection?
         // But the Memory trait's retrieve is usually for "recent context".
@@ -662,14 +662,14 @@ impl Memory for QmdMemory {
         Vec::new() 
     }
 
-    async fn clear(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<()> {
+    async fn clear(&self, _user_id: &str, _agent_id: Option<&str>) -> crate::error::Result<()> {
         // QmdStore needs a way to delete collections or documents by pattern.
         // For now, we can just vacuum or clear the whole DB if needed, 
         // or implement selective deletion in QmdStore later.
         Ok(())
     }
 
-    async fn undo(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<Option<Message>> {
+    async fn undo(&self, _user_id: &str, _agent_id: Option<&str>) -> crate::error::Result<Option<Message>> {
         // Not strictly required for LTM, but could be implemented by finding the latest doc.
         Ok(None)
     }

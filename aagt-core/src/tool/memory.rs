@@ -45,7 +45,7 @@ impl Tool for SearchHistoryTool {
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
             query: String,
@@ -122,7 +122,7 @@ impl Tool for RememberThisTool {
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
             title: String,
