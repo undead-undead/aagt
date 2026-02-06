@@ -725,8 +725,8 @@ impl<P: Provider> AgentBuilder<P> {
         }
         
         // Add all loaded skills as tools
-        for (_, skill) in skill_loader.skills.iter() {
-            self.tools.add_shared(Arc::clone(skill) as Arc<dyn crate::skills::tool::Tool>);
+        for skill_ref in skill_loader.skills.iter() {
+            self.tools.add_shared(Arc::clone(skill_ref.value()) as Arc<dyn crate::skills::tool::Tool>);
         }
         
         // Add ClawHub and ReadSkillDoc tools
@@ -803,8 +803,8 @@ impl<P: Provider> AgentBuilder<P> {
                     info!("Loaded DynamicSkills from ./skills");
                     
                     // Add all loaded skills as tools
-                    for (_, skill) in skill_loader.skills.iter() {
-                        self.tools.add_shared(Arc::clone(skill) as Arc<dyn crate::skills::tool::Tool>);
+                    for skill_ref in skill_loader.skills.iter() {
+                        self.tools.add_shared(Arc::clone(skill_ref.value()) as Arc<dyn crate::skills::tool::Tool>);
                     }
                     
                     // Add ClawHub and ReadSkillDoc tools

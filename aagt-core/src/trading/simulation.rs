@@ -7,7 +7,6 @@ use std::sync::Arc;
 use crate::error::Result;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 
 /// Result of a trade simulation

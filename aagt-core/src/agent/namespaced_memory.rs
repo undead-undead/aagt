@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::agent::memory::MemoryManager;
+use crate::agent::memory::{MemoryManager, Memory};
 use crate::error::Result;
 
 /// Metadata for namespaced memory entries
@@ -110,7 +110,7 @@ impl NamespacedMemory {
         let serialized = serde_json::to_string(&entry)
             .map_err(|e| crate::error::Error::Internal(format!("Failed to serialize entry: {}", e)))?;
 
-        self.memory.remember(&full_key, &serialized).await
+        self.memory.store_knowledge("system", None, &full_key, &serialized, "namespaced_memory").await
     }
 
     /// Read a value from a specific namespace
@@ -131,7 +131,7 @@ impl NamespacedMemory {
     pub async fn read(&self, namespace: &str, key: &str) -> Result<Option<String>> {
         let full_key = format!("{}::{}", namespace, key);
         
-        let results = self.memory.search(&full_key).await?;
+        let results = self.memory.search("system", None, &full_key, 1).await?;
         
         if results.is_empty() {
             return Ok(None);
@@ -155,7 +155,7 @@ impl NamespacedMemory {
     pub async fn read_with_metadata(&self, namespace: &str, key: &str) -> Result<Option<MemoryEntry>> {
         let full_key = format!("{}::{}", namespace, key);
         
-        let results = self.memory.search(&full_key).await?;
+        let results = self.memory.search("system", None, &full_key, 1).await?;
         
         if results.is_empty() {
             return Ok(None);
@@ -176,7 +176,7 @@ impl NamespacedMemory {
     /// List all keys in a namespace
     pub async fn list_keys(&self, namespace: &str) -> Result<Vec<String>> {
         let prefix = format!("{}::", namespace);
-        let results = self.memory.search(&prefix).await?;
+        let results = self.memory.search("system", None, &prefix, 100).await?;
         
         let mut keys = Vec::new();
         for result in results {
