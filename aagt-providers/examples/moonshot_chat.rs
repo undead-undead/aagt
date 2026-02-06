@@ -1,5 +1,5 @@
 use aagt_core::message::Message;
-use aagt_core::provider::Provider;
+use aagt_core::agent::provider::Provider;
 use aagt_providers::moonshot::{Moonshot, MOONSHOT_V1_8K};
 use futures::StreamExt;
 use std::io::Write;

@@ -8,6 +8,7 @@
 //! - AgentBuilder
 
 use aagt_core::prelude::*;
+use aagt_core::agent::memory::QmdMemory;
 use aagt_core::tool::{memory::{SearchHistoryTool, RememberThisTool}};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -142,7 +143,7 @@ async fn test_agent_with_memory_tools() {
     struct TestProvider;
     
     #[async_trait::async_trait]
-    impl aagt_core::provider::Provider for TestProvider {
+    impl aagt_core::agent::provider::Provider for TestProvider {
         fn name(&self) -> &'static str {
             "test"
         }

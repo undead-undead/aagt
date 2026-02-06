@@ -110,6 +110,7 @@ pub mod content_hash;
 pub mod error;
 pub mod store;
 pub mod virtual_path;
+pub mod watcher;
 
 // Phase 2 modules (vector feature)
 pub mod hybrid_search;
@@ -128,6 +129,7 @@ pub use content_hash::{get_docid, hash_content, normalize_docid, validate_docid}
 pub use error::{QmdError, Result};
 pub use store::{Collection, Document, QmdStore, SearchResult, StoreStats};
 pub use virtual_path::VirtualPath;
+pub use watcher::FileWatcher;
 
 // Re-exports: Phase 2
 pub use hybrid_search::{

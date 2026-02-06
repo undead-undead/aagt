@@ -34,36 +34,25 @@ async fn main() -> Result<()> {
     println!("\n--- 2. Testing Memory Isolation ---");
     let mem_manager = MemoryManager::with_capacity(10, 10, 100, PathBuf::from("data/audit_test_memory.jsonl")).await?;
     
-    let entry1 = MemoryEntry {
-        id: "1".to_string(),
-        user_id: "user1".to_string(),
-        content: "Agent A specialized knowledge".to_string(),
-        timestamp: 1000,
-        tags: vec!["audit".to_string()],
-        relevance: 1.0,
-    };
-    
-    let entry2 = MemoryEntry {
-        id: "2".to_string(),
-        user_id: "user1".to_string(),
-        content: "Agent B private data".to_string(),
-        timestamp: 1001,
-        tags: vec!["audit".to_string()],
-        relevance: 1.0,
-    };
+    // Use Message API instead of raw MemoryEntry
+    let msg1 = Message::assistant("Agent A specialized knowledge");
+    let msg2 = Message::assistant("Agent B private data");
 
-    mem_manager.long_term.store_entry(entry1, Some("agent_a")).await?;
-    mem_manager.long_term.store_entry(entry2, Some("agent_b")).await?;
+    mem_manager.long_term.store("user1", Some("agent_a"), msg1).await?;
+    mem_manager.long_term.store("user1", Some("agent_b"), msg2).await?;
 
-    let retrieved_a = mem_manager.long_term.retrieve_by_tag("user1", "audit", Some("agent_a"), 10).await;
-    let retrieved_b = mem_manager.long_term.retrieve_by_tag("user1", "audit", Some("agent_b"), 10).await;
+    // Allow some time for async indexing if needed (QMD is usually fast but might be async)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let retrieved_a = mem_manager.long_term.retrieve("user1", Some("agent_a"), 10).await;
+    let retrieved_b = mem_manager.long_term.retrieve("user1", Some("agent_b"), 10).await;
 
     println!("Agent A retrieved: {}", retrieved_a.len());
     println!("Agent B retrieved: {}", retrieved_b.len());
     
     assert_eq!(retrieved_a.len(), 1);
     assert_eq!(retrieved_b.len(), 1);
-    assert_ne!(retrieved_a[0].content, retrieved_b[0].content);
+    assert_ne!(retrieved_a[0].content.as_text(), retrieved_b[0].content.as_text());
     println!("✅ Memory isolation working correctly");
 
     println!("\n--- 3. Testing Global Risk Guardrail (Shared State) ---");

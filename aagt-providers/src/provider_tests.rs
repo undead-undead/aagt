@@ -6,7 +6,7 @@
 
 #[cfg(test)]
 mod provider_tests {
-    use aagt_core::provider::Provider;
+    use crate::Provider;
 
     #[test]
     #[cfg(feature = "openai")]

@@ -39,7 +39,7 @@ impl Tool for GetWeather {
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
             city: String,
@@ -80,7 +80,7 @@ impl Tool for Calculate {
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
             expression: String,

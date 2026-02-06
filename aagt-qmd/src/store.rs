@@ -16,6 +16,7 @@ pub struct Document {
     pub hash: String,
     pub docid: String,
     pub body: Option<String>,
+    pub summary: Option<String>,
     pub created_at: String,
     pub modified_at: String,
     pub active: bool,
@@ -98,6 +99,7 @@ impl QmdStore {
                 path TEXT NOT NULL,
                 title TEXT NOT NULL,
                 hash TEXT NOT NULL,
+                summary TEXT,
                 created_at TEXT NOT NULL,
                 modified_at TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
@@ -106,6 +108,18 @@ impl QmdStore {
             )",
             [],
         )?;
+
+        // Migration: Add summary column if it doesn't exist (for existing DBs)
+        let has_summary: bool = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('documents') WHERE name='summary'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )?;
+
+        if !has_summary {
+            debug!("Migrating: Adding 'summary' column to 'documents' table");
+            conn.execute("ALTER TABLE documents ADD COLUMN summary TEXT", [])?;
+        }
 
         // Indexes for fast lookup
         conn.execute(
@@ -243,7 +257,7 @@ impl QmdStore {
                 // Content changed, update document
                 debug!("Content changed, updating document");
                 tx.execute(
-                    "UPDATE documents SET title = ?, hash = ?, modified_at = ? WHERE id = ?",
+                    "UPDATE documents SET title = ?, hash = ?, modified_at = ?, summary = NULL WHERE id = ?",
                     params![title, hash, now, id],
                 )?;
             }
@@ -269,6 +283,7 @@ impl QmdStore {
             hash: hash.clone(),
             docid,
             body: Some(body.to_string()),
+            summary: None, // Summary is generated asynchronously
             created_at: now.clone(),
             modified_at: now,
             active: true,
@@ -284,7 +299,7 @@ impl QmdStore {
         let row = conn
             .query_row(
                 "SELECT d.id, d.collection, d.path, d.title, d.hash, d.created_at, d.modified_at,
-                        d.active, c.doc
+                        d.active, c.doc, d.summary
                  FROM documents d
                  JOIN content c ON d.hash = c.hash
                  WHERE d.collection = ? AND d.path = ? AND d.active = 1",
@@ -301,6 +316,7 @@ impl QmdStore {
                         modified_at: row.get(6)?,
                         active: row.get(7)?,
                         body: Some(row.get(8)?),
+                        summary: row.get(9)?,
                     })
                 },
             )
@@ -326,7 +342,7 @@ impl QmdStore {
         let row = conn
             .query_row(
                 "SELECT d.id, d.collection, d.path, d.title, d.hash, d.created_at, d.modified_at,
-                        d.active, c.doc
+                        d.active, c.doc, d.summary
                  FROM documents d
                  JOIN content c ON d.hash = c.hash
                  WHERE d.hash LIKE ? AND d.active = 1
@@ -344,6 +360,7 @@ impl QmdStore {
                         modified_at: row.get(6)?,
                         active: row.get(7)?,
                         body: Some(row.get(8)?),
+                        summary: row.get(9)?,
                     })
                 },
             )
@@ -361,7 +378,8 @@ impl QmdStore {
         let mut stmt = conn.prepare(
             "SELECT d.id, d.collection, d.path, d.title, d.hash, d.created_at, d.modified_at,
                     d.active, bm25(documents_fts) as score,
-                    snippet(documents_fts, 2, '<mark>', '</mark>', '...', 32) as snippet
+                    snippet(documents_fts, 2, '<mark>', '</mark>', '...', 32) as snippet,
+                    d.summary
              FROM documents d
              JOIN documents_fts ON documents_fts.rowid = d.id
              WHERE documents_fts MATCH ? AND d.active = 1
@@ -384,6 +402,7 @@ impl QmdStore {
                         modified_at: row.get(6)?,
                         active: row.get(7)?,
                         body: None, // Don't load body in search results
+                        summary: row.get(10)?,
                     },
                     score: row.get::<_, f64>(8)?.abs(), // BM25 score (absolute value)
                     snippet: Some(row.get(9)?),
@@ -408,7 +427,8 @@ impl QmdStore {
         let mut stmt = conn.prepare(
             "SELECT d.id, d.collection, d.path, d.title, d.hash, d.created_at, d.modified_at,
                     d.active, bm25(documents_fts) as score,
-                    snippet(documents_fts, 2, '<mark>', '</mark>', '...', 32) as snippet
+                    snippet(documents_fts, 2, '<mark>', '</mark>', '...', 32) as snippet,
+                    d.summary
              FROM documents d
              JOIN documents_fts ON documents_fts.rowid = d.id
              WHERE documents_fts MATCH ? AND d.collection = ? AND d.active = 1
@@ -431,6 +451,7 @@ impl QmdStore {
                         modified_at: row.get(6)?,
                         active: row.get(7)?,
                         body: None,
+                        summary: row.get(10)?,
                     },
                     score: row.get::<_, f64>(8)?.abs(),
                     snippet: Some(row.get(9)?),
@@ -557,6 +578,21 @@ impl QmdStore {
 
         Ok(deleted_count)
     }
+
+    /// Update the summary for a document
+    pub fn update_summary(&self, collection: &str, path: &str, summary: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| QmdError::Custom("Lock poisoned".to_string()))?;
+
+        conn.execute(
+            "UPDATE documents SET summary = ? WHERE collection = ? AND path = ?",
+            params![summary, collection, path],
+        )?;
+
+        Ok(())
+    }
 }
 
 /// Store statistics
@@ -606,6 +642,17 @@ mod tests {
             .unwrap();
         assert_eq!(retrieved.title, "SOL Trading Strategy");
         assert_eq!(retrieved.body.unwrap(), "Buy SOL when RSI < 30");
+        assert!(retrieved.summary.is_none());
+
+        // Update summary
+        store
+            .update_summary("trading", "strategies/sol.md", "Short summary")
+            .unwrap();
+        let updated = store
+            .get_by_path("trading", "strategies/sol.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.summary.unwrap(), "Short summary");
 
         // Retrieve by docid
         let by_docid = store.get_by_docid(&doc.docid).unwrap().unwrap();

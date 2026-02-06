@@ -192,6 +192,22 @@ impl VectorStore {
         Ok(results)
     }
 
+    /// Get the representative embedding for a document (first chunk)
+    pub fn get_vector(&self, docid: &str) -> Result<Option<Vec<u8>>> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| QmdError::Custom("Lock poisoned".to_string()))?;
+
+        // Find the first chunk (seq 0) for this docid
+        let entry = entries
+            .iter()
+            .find(|e| e.docid == docid && e.chunk_seq == 0)
+            .or_else(|| entries.iter().find(|e| e.docid == docid)); // Fallback to any chunk if seq 0 not found
+
+        Ok(entry.map(|e| e.embedding.clone()))
+    }
+
     pub fn len(&self) -> usize {
         self.entries.read().map(|e| e.len()).unwrap_or(0)
     }

@@ -140,6 +140,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                     name: #tool_name.to_string(),
                     description: #tool_description.to_string(),
                     parameters: schema_json,
+                    parameters_ts: None, // TODO: Implement TS generation from schema
                 }
             }
 
@@ -226,6 +227,7 @@ pub fn derive_tool(input: TokenStream) -> TokenStream {
                     name: #name.to_string(),
                     description: #description.to_string(),
                     parameters: schema_json,
+                    parameters_ts: None,
                 }
             }
 

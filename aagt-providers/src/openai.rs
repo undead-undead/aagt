@@ -10,7 +10,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result, Message, StreamingChoice, StreamingResponse, ToolDefinition, Provider, HttpConfig};
-use aagt_core::message::{Role, Content};
+use aagt_core::agent::message::{Role, Content};
 
 /// OpenAI API client
 pub struct OpenAI {
@@ -200,18 +200,18 @@ impl OpenAI {
                     
                     for part in parts {
                         match part {
-                            aagt_core::message::ContentPart::Text { text } => {
+                            aagt_core::agent::message::ContentPart::Text { text } => {
                                 text_acc.push_str(&text);
                                 json_parts.push(serde_json::json!({
                                     "type": "text",
                                     "text": text
                                 }));
                             },
-                            aagt_core::message::ContentPart::Image { source } => {
+                                    aagt_core::agent::message::ContentPart::Image { source } => {
                                 // Fix #8: Support Images (Url and Base64)
                                 let url = match source {
-                                    aagt_core::message::ImageSource::Url { url } => url,
-                                    aagt_core::message::ImageSource::Base64 { media_type, data } => {
+                                    aagt_core::agent::message::ImageSource::Url { url } => url,
+                                    aagt_core::agent::message::ImageSource::Base64 { media_type, data } => {
                                         format!("data:{};base64,{}", media_type, data)
                                     }
                                 };
@@ -224,7 +224,7 @@ impl OpenAI {
                                     }
                                 }));
                             },
-                             aagt_core::message::ContentPart::ToolCall { id, name, arguments } => {
+                             aagt_core::agent::message::ContentPart::ToolCall { id, name, arguments } => {
                                 tool_calls.push(OpenAIToolCall {
                                     id,
                                     call_type: "function".to_string(),
@@ -234,7 +234,7 @@ impl OpenAI {
                                     },
                                 });
                             },
-                            aagt_core::message::ContentPart::ToolResult { tool_call_id: id, content, .. } => {
+                            aagt_core::agent::message::ContentPart::ToolResult { tool_call_id: id, content, .. } => {
                                 tool_call_id = Some(id);
                                 text_acc = content; // Tool result content is simple string usually
                             },
@@ -275,13 +275,21 @@ impl OpenAI {
     fn convert_tools(tools: Vec<ToolDefinition>) -> Vec<OpenAITool> {
         tools
             .into_iter()
-            .map(|t| OpenAITool {
-                tool_type: "function".to_string(),
-                function: OpenAIToolFunction {
-                    name: t.name,
-                    description: t.description,
-                    parameters: t.parameters,
-                },
+            .map(|t| {
+                let description = if let Some(ts) = &t.parameters_ts {
+                    format!("{}\n\nUse this TypeScript interface for parameter structure:\n```typescript\n{}\n```", t.description, ts)
+                } else {
+                    t.description.clone()
+                };
+
+                OpenAITool {
+                    tool_type: "function".to_string(),
+                    function: OpenAIToolFunction {
+                        name: t.name,
+                        description,
+                        parameters: t.parameters,
+                    },
+                }
             })
             .collect()
     }
@@ -310,9 +318,15 @@ impl Provider for OpenAI {
             None
         };
 
+        let mut request_messages = Self::convert_messages(system_prompt, messages);
+
+        // If tools have TS interfaces, we might want to prioritize them.
+        // For OpenAI, we still MUST send the JSON schema in the `tools` parameter.
+        // However, we can enhance the system prompt or tool descriptions.
+        
         let request = ChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(system_prompt, messages),
+            messages: request_messages,
             temperature,
             max_tokens,
             tools: Self::convert_tools(tools),
@@ -438,7 +452,7 @@ where
                                                  let args: serde_json::Value = serde_json::from_str(&state.arguments)
                                                     .unwrap_or(serde_json::Value::Null);
                                                  
-                                                 tools_map.insert(index, aagt_core::message::ToolCall {
+                                                 tools_map.insert(index, aagt_core::agent::message::ToolCall {
                                                     id,
                                                     name,
                                                     arguments: args, 
@@ -526,7 +540,7 @@ mod tests {
 
 // --- Embeddings Implementation ---
 
-use aagt_core::rag::Embeddings;
+use aagt_core::knowledge::rag::Embeddings;
 
 #[derive(Debug, Serialize)]
 struct EmbeddingRequest {

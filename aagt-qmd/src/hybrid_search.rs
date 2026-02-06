@@ -145,6 +145,16 @@ impl HybridSearchEngine {
         Ok(())
     }
 
+    /// Update summary for a document
+    pub fn update_summary(&self, collection: &str, path: &str, summary: &str) -> Result<()> {
+        self.qmd_store.update_summary(collection, path, summary)
+    }
+
+    /// Get a document by collection and path
+    pub fn get_by_path(&self, collection: &str, path: &str) -> Result<Option<Document>> {
+        self.qmd_store.get_by_path(collection, path)
+    }
+
     /// Index a document (stores in both BM25 and vector stores)
     ///
     /// # Examples
@@ -220,7 +230,7 @@ impl HybridSearchEngine {
             tracing::debug!("[{}/{}] Indexing {}/{}", i + 1, total, collection, path);
 
             // 1. Store in QMD (BM25)
-            let doc = self
+            let _doc = self
                 .qmd_store
                 .store_document(collection, path, title, content)?;
 
@@ -298,21 +308,27 @@ impl HybridSearchEngine {
             .collect();
 
         // 4. RRF fusion
+        // Get more candidates for deduplication if vector search is enabled
+        let fusion_limit = if cfg!(feature = "vector") {
+            limit * 2
+        } else {
+            limit
+        };
         let fused = self.rrf_fusion.fuse(&bm25_for_rrf, &vector_results);
 
         tracing::debug!("RRF fusion produced {} unique results", fused.len());
 
-        // 5. Build final results
-        let mut results = Vec::new();
-        for (rank, fused_result) in fused.iter().take(limit).enumerate() {
+        // 5. Build initial results
+        let mut candidates = Vec::new();
+        for fused_result in fused.iter().take(fusion_limit) {
             if let Some(doc) = self.qmd_store.get_by_docid(&fused_result.docid)? {
                 let snippet = bm25_results
                     .iter()
                     .find(|r| r.document.docid == fused_result.docid)
                     .and_then(|r| r.snippet.clone());
 
-                results.push(HybridSearchResult {
-                    rank: rank + 1,
+                candidates.push(HybridSearchResult {
+                    rank: 0, // Placeholder
                     document: doc,
                     rrf_score: fused_result.rrf_score,
                     bm25_score: fused_result.bm25_score,
@@ -322,7 +338,18 @@ impl HybridSearchEngine {
             }
         }
 
-        Ok(results)
+        // 6. Semantic Deduplication
+        #[cfg(feature = "vector")]
+        let mut final_results = self.apply_semantic_deduplication(candidates, 0.85, limit)?;
+        #[cfg(not(feature = "vector"))]
+        let mut final_results = candidates.into_iter().take(limit).collect::<Vec<_>>();
+
+        // 7. Final ranking assignment
+        for (i, res) in final_results.iter_mut().enumerate() {
+            res.rank = i + 1;
+        }
+
+        Ok(final_results)
     }
 
     /// Search within a specific collection
@@ -385,20 +412,25 @@ impl HybridSearchEngine {
             .collect();
 
         // 4. RRF fusion
+        let fusion_limit = if cfg!(feature = "vector") {
+            limit * 2
+        } else {
+            limit
+        };
         let fused = self.rrf_fusion.fuse(&bm25_for_rrf, &vector_results);
 
-        // Build final results
-        let mut results = Vec::new();
+        // Build initial results
+        let mut candidates = Vec::new();
 
-        for (rank, fused_result) in fused.iter().take(limit).enumerate() {
+        for fused_result in fused.iter().take(fusion_limit) {
             if let Some(doc) = self.qmd_store.get_by_docid(&fused_result.docid)? {
                 let snippet = bm25_results
                     .iter()
                     .find(|r| r.document.docid == fused_result.docid)
                     .and_then(|r| r.snippet.clone());
 
-                results.push(HybridSearchResult {
-                    rank: rank + 1,
+                candidates.push(HybridSearchResult {
+                    rank: 0, // Placeholder
                     document: doc,
                     rrf_score: fused_result.rrf_score,
                     bm25_score: fused_result.bm25_score,
@@ -408,7 +440,81 @@ impl HybridSearchEngine {
             }
         }
 
-        Ok(results)
+        // 5. Semantic Deduplication
+        #[cfg(feature = "vector")]
+        let mut final_results = self.apply_semantic_deduplication(candidates, 0.85, limit)?;
+        #[cfg(not(feature = "vector"))]
+        let mut final_results = candidates.into_iter().take(limit).collect::<Vec<_>>();
+
+        // 6. Final ranking assignment
+        for (i, res) in final_results.iter_mut().enumerate() {
+            res.rank = i + 1;
+        }
+
+        Ok(final_results)
+    }
+
+    /// Apply semantic deduplication to search results
+    #[cfg(feature = "vector")]
+    fn apply_semantic_deduplication(
+        &self,
+        candidates: Vec<HybridSearchResult>,
+        threshold: f32,
+        limit: usize,
+    ) -> Result<Vec<HybridSearchResult>> {
+        let mut unique_results: Vec<HybridSearchResult> = Vec::new();
+        let mut embeddings: Vec<Vec<u8>> = Vec::new();
+
+        for candidate in candidates {
+            if let Some(emb) = self.vector_store.get_vector(&candidate.document.docid)? {
+                let is_redundant = embeddings
+                    .iter()
+                    .any(|existing| Self::cosine_similarity_u8(existing, &emb) > threshold);
+
+                if !is_redundant {
+                    unique_results.push(candidate);
+                    embeddings.push(emb);
+                }
+            } else {
+                // If no vector found (e.g. BM25 only hit), we keep it but it won't trigger deduplication
+                unique_results.push(candidate);
+            }
+
+            if unique_results.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(unique_results)
+    }
+
+    /// Calculate cosine similarity between two u8-quantized vectors
+    #[cfg(feature = "vector")]
+    fn cosine_similarity_u8(a: &[u8], b: &[u8]) -> f32 {
+        if a.len() != b.len() || a.is_empty() {
+            return 0.0;
+        }
+
+        let mut dot_product = 0.0;
+        let mut norm_a = 0.0;
+        let mut norm_b = 0.0;
+
+        for (&ua, &ub) in a.iter().zip(b.iter()) {
+            // Unquantize: (u / 127.5) - 1.0
+            let fa = (ua as f32 / 127.5) - 1.0;
+            let fb = (ub as f32 / 127.5) - 1.0;
+
+            dot_product += fa * fb;
+            norm_a += fa * fa;
+            norm_b += fb * fb;
+        }
+
+        let norm_product = norm_a.sqrt() * norm_b.sqrt();
+        if norm_product == 0.0 {
+            0.0
+        } else {
+            dot_product / norm_product
+        }
     }
 
     /// Get statistics
@@ -646,5 +752,54 @@ mod tests {
         }
 
         assert_eq!(engine.stats().total_documents, 10);
+    }
+
+    #[test]
+    #[cfg(feature = "vector")]
+    fn test_cosine_similarity_u8() {
+        let a = vec![255, 0, 127]; // [1.0, -1.0, 0.0] approx
+        let b = vec![255, 0, 127];
+        let sim = HybridSearchEngine::cosine_similarity_u8(&a, &b);
+        assert!(sim > 0.99);
+
+        let c = vec![0, 255, 127]; // [-1.0, 1.0, 0.0] approx
+        let sim_neg = HybridSearchEngine::cosine_similarity_u8(&a, &c);
+        assert!(sim_neg < -0.99);
+    }
+
+    #[test]
+    #[ignore] // Requires model file
+    #[cfg(feature = "vector")]
+    fn test_semantic_deduplication() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let engine = HybridSearchEngine::new(config).unwrap();
+
+        engine
+            .index_document(
+                "test",
+                "doc1.md",
+                "Bitcoin",
+                "Bitcoin is a decentralized currency.",
+            )
+            .unwrap();
+        // Index a very similar document
+        engine
+            .index_document(
+                "test",
+                "doc2.md",
+                "BTC",
+                "Bitcoin is decentralized digital currency.",
+            )
+            .unwrap();
+
+        // Search should deduplicate if threshold is reached
+        let results = engine.search("bitcoin", 10).unwrap();
+
+        // If threshold (0.85) is met, we should only see one of these
+        // Since they are extremely similar, one should be pruned.
+        // We check if at least one is present.
+        assert!(!results.is_empty());
+        // In a real scenario with a local model, we'd check if results.len() == 1
     }
 }

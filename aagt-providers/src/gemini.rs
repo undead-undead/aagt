@@ -8,7 +8,7 @@ use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result, Message, StreamingChoice, StreamingResponse, ToolDefinition, Provider, HttpConfig};
-use aagt_core::message::{Role, Content};
+use aagt_core::agent::message::{Role, Content};
 
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -154,8 +154,8 @@ impl Gemini {
                     Content::Parts(content_parts) => content_parts
                         .into_iter()
                         .filter_map(|p| match p {
-                            aagt_core::message::ContentPart::Text { text } => Some(Part::Text { text }),
-                            aagt_core::message::ContentPart::ToolCall { name, arguments, .. } => {
+                            aagt_core::agent::message::ContentPart::Text { text } => Some(Part::Text { text }),
+                            aagt_core::agent::message::ContentPart::ToolCall { name, arguments, .. } => {
                                 Some(Part::FunctionCall {
                                     function_call: FunctionCall {
                                         name,
@@ -163,7 +163,7 @@ impl Gemini {
                                     }
                                 })
                             },
-                            aagt_core::message::ContentPart::ToolResult { name, content, .. } => {
+                            aagt_core::agent::message::ContentPart::ToolResult { name, content, .. } => {
                                 // Gemini requires a name here. If it's missing, we are in trouble.
                                 // We fallback to "unknown" or hope caller provided it.
                                 let name = name.unwrap_or_else(|| "unknown".to_string());

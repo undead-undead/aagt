@@ -27,20 +27,16 @@ The central executor.
 ---
 
 ## Layer 2: Capability & Extension
-Bridges the Rust core to the external world via gRPC and WASM.
+Bridges the Rust core to the external world via gRPC and sandbox execution.
 
 ### Sidecar (gRPC Capability)
 Stateful, rich execution in Python.
 - SidecarManager: Manages the lifecycle of the Python ipykernel subprocess.
 - Sidecar::execute(code): Execute Python code and receive stdout, stderr, and images.
 
-### WasmRuntime (WASM Capability)
-Hot-swappable plugins for dynamic skills.
-- WasmRuntime::new(bytes): Initialize a WASM engine (Wasmtime).
-- WasmRuntime::call(args): Execute guest code in a WASI sandbox.
 
 ### DynamicSkill
-Universal wrapper for python3, node, bash, and wasm skill types.
+Universal wrapper for python3, node, and bash skill types.
 - **Sandbox Integration**: Automatically uses `bwrap` (Bubblewrap) if available.
 - **Strict Mode**: If `allow_network` is false and `bwrap` is missing, execution is blocked.
 

@@ -8,8 +8,10 @@
 /// 5. Unified architecture
 
 use aagt_core::prelude::*;
+use aagt_core::trading::risk::TradeContext;
+use aagt_core::skills::SkillExecutionConfig;
 use aagt_core::risk::InMemoryRiskStore;
-use aagt_core::strategy::{FileStrategyStore, PriceDirection, NotifyChannel, StrategyStore};
+use aagt_core::strategy::{FileStrategyStore, PriceDirection, StrategyStore};
 use std::sync::Arc;
 use rust_decimal_macros::dec;
 use rust_decimal::Decimal;
@@ -33,7 +35,7 @@ async fn main() -> Result<()> {
         trade_cooldown_secs: 30,
     };
     
-    let risk_manager = Arc::new(
+    let risk_manager: Arc<RiskManager> = Arc::new(
         RiskManager::with_config(
             risk_config,
             Arc::new(InMemoryRiskStore)
@@ -99,7 +101,7 @@ async fn main() -> Result<()> {
     // 3. Background Maintenance
     println!("\n🧹 Starting background maintenance...");
     
-    let short_term = Arc::new(ShortTermMemory::new(100, 10, "data/demo_stm.json").await);
+    let short_term: Arc<ShortTermMemory> = Arc::new(ShortTermMemory::new(100, 10, "data/demo_stm.json").await);
     
     let mut maintenance = MaintenanceManager::new();
     let config = MaintenanceConfig {

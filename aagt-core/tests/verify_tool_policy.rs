@@ -1,6 +1,6 @@
 use aagt_core::prelude::*;
-use aagt_core::agent::{ToolPolicy, RiskyToolPolicy};
-use aagt_core::tool::{Tool, ToolDefinition};
+use aagt_core::agent::core::{ToolPolicy, RiskyToolPolicy};
+use aagt_core::skills::tool::{Tool, ToolDefinition};
 use aagt_core::error::Result;
 use async_trait::async_trait;
 use serde_json::json;
@@ -18,8 +18,8 @@ impl Tool for DangerousTool {
             parameters: json!({"type": "object"}),
         }
     }
-    async fn call(&self, _args: &str) -> Result<String> {
-        Ok("BOOM!".to_string())
+    async fn call(&self, _args: &str) -> anyhow::Result<String> {
+        Ok("safe".to_string())
     }
 }
 
@@ -35,14 +35,14 @@ impl Tool for SafeTool {
             parameters: json!({"type": "object"}),
         }
     }
-    async fn call(&self, _args: &str) -> Result<String> {
-        Ok("Data read".to_string())
+    async fn call(&self, _args: &str) -> anyhow::Result<String> {
+        Ok("dangerous".to_string())
     }
 }
 
 // Mock provider needed for Agent construction
-use aagt_core::provider::Provider;
-use aagt_core::streaming::StreamingResponse;
+use aagt_core::agent::provider::Provider;
+use aagt_core::agent::streaming::StreamingResponse;
 struct MockProvider;
 #[async_trait]
 impl Provider for MockProvider {

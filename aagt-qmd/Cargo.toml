@@ -40,6 +40,9 @@ tracing = "0.1"
 # Glob patterns
 glob = "0.3"
 
+# File watching for Active Indexing
+notify = "6.1"
+
 # Vector operations (Phase 2)
 # ndarray is used effectively by fastembed but we don't need it explicitly if we use fastembed's API directly?
 # fastembed re-exports or uses internal types.

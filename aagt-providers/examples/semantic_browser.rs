@@ -7,7 +7,7 @@
 /// This approach reduces token usage by 95% and improves agent reasoning.
 
 use aagt_core::prelude::*;
-use aagt_core::tool::{Tool, ToolDefinition};
+use aagt_core::skills::tool::{Tool, ToolDefinition};
 use aagt_core::error::{Error, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -87,18 +87,15 @@ impl Tool for BrowserTool {
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, args: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
             url: String,
         }
-        let args: Args = serde_json::from_str(arguments).map_err(|e| Error::ToolArguments {
-            tool_name: "browse_web".to_string(),
-            message: e.to_string(),
-        })?;
+        let args: Args = serde_json::from_str(args).map_err(|e| anyhow::anyhow!("Tool arguments error: {}", e))?;
 
         // Use the shared browser instance
-        self.browser.browse(&args.url).await
+        self.browser.browse(&args.url).await.map_err(|e| anyhow::anyhow!("Browser error: {}", e))
     }
 }
 

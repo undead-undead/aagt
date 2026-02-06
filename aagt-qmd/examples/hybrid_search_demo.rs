@@ -34,12 +34,15 @@ fn main() -> Result<()> {
 
     let mut config = HybridSearchConfig::default();
     // Update embedder paths
-    config.embedder_config.model_path = models_dir.join("model.safetensors");
-    config.embedder_config.tokenizer_path = models_dir.join("tokenizer.json");
-    config.embedder_config.config_path = models_dir.join("config.json");
+    #[cfg(feature = "vector")]
+    {
+        config.embedder_config.model_path = models_dir.join("model.safetensors");
+        config.embedder_config.tokenizer_path = models_dir.join("tokenizer.json");
+        config.embedder_config.config_path = models_dir.join("config.json");
 
-    // Update chunker path
-    config.chunker_config.tokenizer_path = models_dir.join("tokenizer.json");
+        // Update chunker path
+        config.chunker_config.tokenizer_path = models_dir.join("tokenizer.json");
+    }
 
     let mut engine = HybridSearchEngine::new(config)?;
 

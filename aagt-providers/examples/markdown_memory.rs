@@ -4,7 +4,7 @@
 /// This acts as a persistent log or journal that is human-readable.
 
 use aagt_core::prelude::*;
-use aagt_core::tool::{Tool, ToolDefinition};
+use aagt_core::skills::tool::{Tool, ToolDefinition};
 use aagt_core::error::{Error, Result};
 use aagt_providers::gemini::{Gemini, GEMINI_2_0_FLASH};
 use async_trait::async_trait;

@@ -1,4 +1,4 @@
-use crate::anyhow::Error as AnyhowError;
+use anyhow::Error as AnyhowError;
 use thiserror::Error;
 
 /// Result type alias using aagt's Error

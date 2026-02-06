@@ -15,7 +15,7 @@
 //! ```
 
 use aagt_core::prelude::*;
-use aagt_core::tool::{memory::{SearchHistoryTool, RememberThisTool}};
+use aagt_core::skills::tool::{memory::{SearchHistoryTool, RememberThisTool}};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -23,7 +23,7 @@ use tempfile::TempDir;
 struct MockProvider;
 
 #[async_trait::async_trait]
-impl aagt_core::provider::Provider for MockProvider {
+impl aagt_core::agent::provider::Provider for MockProvider {
     fn name(&self) -> &'static str {
         "mock"
     }
@@ -43,7 +43,7 @@ impl aagt_core::provider::Provider for MockProvider {
             .and_then(|m| match &m.content {
                 Content::Text(t) => Some(t.as_str()),
                 Content::Parts(parts) => parts.iter().find_map(|p| {
-                    if let aagt_core::message::ContentPart::Text { text } = p {
+                    if let aagt_core::agent::message::ContentPart::Text { text } = p {
                         Some(text.as_str())
                     } else {
                         None
@@ -64,7 +64,7 @@ impl aagt_core::provider::Provider for MockProvider {
 
         // Create a simple streaming response
         use futures::stream;
-        use aagt_core::streaming::StreamingChoice;
+        use aagt_core::agent::streaming::StreamingChoice;
         
         let chunks = vec![
             Ok(StreamingChoice::Message(response.to_string())),
@@ -149,7 +149,8 @@ async fn main() -> Result<()> {
         "collection": "trading_knowledge"
     });
 
-    let remember_result = remember_tool.call(&remember_args.to_string()).await?;
+    let remember_result = remember_tool.call(&remember_args.to_string()).await
+        .map_err(|e| aagt_core::Error::Internal(e.to_string()))?;
     println!("✅ {}\n", remember_result);
 
     // 6. Demonstrate search_history tool
@@ -162,7 +163,8 @@ async fn main() -> Result<()> {
         "limit": 5
     });
 
-    let search_results = search_tool.call(&search_args.to_string()).await?;
+    let search_results = search_tool.call(&search_args.to_string()).await
+        .map_err(|e| aagt_core::Error::Internal(e.to_string()))?;
     println!("{}\n", search_results);
 
     // 7. Show memory statistics

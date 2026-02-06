@@ -1,6 +1,8 @@
 //! Integration tests for aagt-core
 
 use aagt_core::prelude::*;
+use aagt_core::agent::message::{Message, Role, Content, ToolCall};
+use aagt_core::agent::memory::{MemoryManager, QmdMemory};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -56,6 +58,7 @@ fn test_agent_config_default() {
 #[tokio::test]
 async fn test_memory_short_term() {
     use aagt_core::memory::{Memory, ShortTermMemory};
+    use aagt_core::agent::memory::QmdMemory;
 
     let memory = ShortTermMemory::new(5, 100, "test_integration_stm.json").await;
     

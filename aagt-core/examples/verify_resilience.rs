@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use aagt_core::prelude::*;
-use aagt_core::provider::CircuitBreakerConfig;
+use aagt_core::agent::provider::CircuitBreakerConfig;
 use std::time::Duration;
 
 #[derive(Clone)]

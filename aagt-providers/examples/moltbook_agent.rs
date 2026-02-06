@@ -11,7 +11,7 @@
 /// - Set MOLTBOOK_API_KEY environment variable (get it from registration)
 /// - Or the agent will auto-register on first run
 
-use aagt_core::{prelude::*, tool::{Tool, ToolDefinition}, error::{Error, Result}};
+use aagt_core::{prelude::*, skills::tool::{Tool, ToolDefinition}, error::{Error, Result}};
 use aagt_providers::openai::{OpenAI, GPT_4O};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -179,12 +179,12 @@ impl Tool for UpvotePost {
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args { post_id: String }
-        let args: Args = serde_json::from_str(arguments).map_err(|e| Error::ToolArguments { tool_name: self.name(), message: e.to_string() })?;
+        let args: Args = serde_json::from_str(arguments)?;
 
-        let api_key = std::env::var("MOLTBOOK_API_KEY").map_err(|_| Error::tool_execution(self.name(), "MOLTBOOK_API_KEY not set".to_string()))?;
+        let api_key = std::env::var("MOLTBOOK_API_KEY")?;
         
         let client = reqwest::Client::new();
         let response = client.post(format!("{}/posts/{}/upvote", MOLTBOOK_BASE_URL, args.post_id))

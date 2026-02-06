@@ -1,0 +1,36 @@
+# Example: Unified Configuration
+
+```toml
+[agent]
+model = "gpt-4o"
+max_history_messages = 20
+enable_sidecar = false
+
+[providers.openai]
+api_key = "${OPENAI_API_KEY}"
+
+[providers.anthropic]
+api_key = "${ANTHROPIC_API_KEY}"
+
+[skills]
+base_path = "./skills"
+allow_network = false
+
+[memory]
+storage_path = "./memory"
+max_capacity_mb = 1000
+
+[notifiers.telegram]
+enabled = true
+bot_token = "${TELEGRAM_BOT_TOKEN}"
+chat_id = "${TELEGRAM_CHAT_ID}"
+
+[security]
+restrict_to_workspace = false
+
+# Future: Bidirectional chat via channels
+[channels.telegram]
+enabled = false
+token = ""
+allow_from = []
+```

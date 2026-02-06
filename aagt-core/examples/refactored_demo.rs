@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     println!("📝 Setting up memory system with background maintenance...");
     
     let short_term = Arc::new(ShortTermMemory::new(100, 10, "data/demo_stm.json").await);
-    let long_term = Arc::new(
+    let long_term: Arc<LongTermMemory> = Arc::new(
         LongTermMemory::new(1000, PathBuf::from("data/demo_memory.jsonl")).await?
     );
 

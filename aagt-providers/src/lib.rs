@@ -7,11 +7,11 @@
 #![warn(missing_docs)]
 
 // Re-export core types for convenience
+pub use aagt_core::agent::message::Message;
+pub use aagt_core::agent::provider::Provider;
+pub use aagt_core::agent::streaming::{StreamingChoice, StreamingResponse};
 pub use aagt_core::error::{Error, Result};
-pub use aagt_core::message::Message;
-pub use aagt_core::provider::Provider;
-pub use aagt_core::streaming::{StreamingChoice, StreamingResponse};
-pub use aagt_core::tool::ToolDefinition;
+pub use aagt_core::skills::tool::ToolDefinition;
 
 pub mod mock;
 pub mod utils;

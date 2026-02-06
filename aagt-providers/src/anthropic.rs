@@ -8,7 +8,7 @@ use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result, Message, StreamingChoice, StreamingResponse, ToolDefinition, Provider, HttpConfig};
-use aagt_core::message::{Role, Content};
+use aagt_core::agent::message::{Role, Content};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -150,15 +150,15 @@ impl Anthropic {
                     Content::Text(text) => AnthropicContent::Text(text),
                     Content::Parts(parts) => {
                         let blocks = parts.into_iter().map(|part| match part {
-                            aagt_core::message::ContentPart::Text { text } => ContentBlock::Text { text },
-                            aagt_core::message::ContentPart::ToolCall { id, name, arguments } => {
+                            aagt_core::agent::message::ContentPart::Text { text } => ContentBlock::Text { text },
+                            aagt_core::agent::message::ContentPart::ToolCall { id, name, arguments } => {
                                 ContentBlock::ToolUse {
                                     id,
                                     name,
                                     input: arguments,
                                 }
                             },
-                            aagt_core::message::ContentPart::ToolResult { tool_call_id, content, .. } => {
+                            aagt_core::agent::message::ContentPart::ToolResult { tool_call_id, content, .. } => {
                                 ContentBlock::ToolResult {
                                     tool_use_id: tool_call_id,
                                     content,

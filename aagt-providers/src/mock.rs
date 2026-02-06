@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::{Result, Message, StreamingResponse, ToolDefinition, Provider};
-use aagt_core::streaming::MockStreamBuilder;
+use aagt_core::agent::streaming::MockStreamBuilder;
 
 /// A mock provider for testing
 pub struct MockProvider {
