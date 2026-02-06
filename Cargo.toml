@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/undead-undead/aagt"
@@ -16,10 +16,10 @@ categories = ["science", "simulation", "asynchronous"]
 
 [workspace.dependencies]
 # Internal crates
-aagt-core = { path = "aagt-core", version = "0.2.2" }
-aagt-macros = { path = "aagt-macros", version = "0.2.2" }
-aagt-providers = { path = "aagt-providers", version = "0.2.2" }
-aagt-qmd = { path = "aagt-qmd", version = "0.2.2", default-features = false, features = ["fts"] }
+aagt-core = { path = "aagt-core", version = "0.2.3" }
+aagt-macros = { path = "aagt-macros", version = "0.2.3" }
+aagt-providers = { path = "aagt-providers", version = "0.2.3" }
+aagt-qmd = { path = "aagt-qmd", version = "0.2.3", default-features = false, features = ["fts"] }
 
 
 # Async runtime
