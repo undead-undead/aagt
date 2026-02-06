@@ -1,10 +1,10 @@
-# AAGT API Reference (v0.2.3)
+# AAGT API Reference (v0.2.5)
 
 AAGT is a modular framework organized into distinct layers, balancing core stability with high-speed extension capabilities.
 
 ---
 
-## 🏗️ Layer 1: Core Orchestration (`aagt-core`)
+## Layer 1: Core Orchestration (`aagt-core`)
 
 The heart of the framework, providing the central execution and coordination logic.
 
@@ -26,7 +26,7 @@ The primary executor.
 
 ---
 
-## 📡 Layer 2: Message Routing (`aagt-core::bus`) [NEW]
+## Layer 2: Message Routing (`aagt-core::bus`) [NEW]
 
 Unified event-driven communication layer.
 
@@ -40,7 +40,7 @@ Standardized schemas for agent communication, supporting text and media attachme
 
 ---
 
-## 🧠 Layer 3: State & Memory (`aagt-core::knowledge`)
+## Layer 3: State & Memory (`aagt-core::knowledge`)
 
 High-performance storage for conversation and domain knowledge.
 
@@ -59,7 +59,7 @@ Isolation layer for specific data categories with TTL support.
 
 ---
 
-## 🛠️ Layer 4: Capability & Infrastructure (`aagt-core::skills`)
+## Layer 4: Capability & Infrastructure (`aagt-core::skills`)
 
 Bridges the framework to external environments.
 
@@ -77,7 +77,7 @@ Bridges the framework to external environments.
 
 ---
 
-## 🛡️ Layer 5: Guardrails & Strategy (`aagt-core::trading`)
+## Layer 5: Guardrails & Strategy (`aagt-core::trading`)
 
 Domain-specific logic for secure quant execution.
 
@@ -91,7 +91,7 @@ The safety filter for every action.
 
 ---
 
-## 🔌 Framework Specifications
+## Framework Specifications
 
 - **Crates**: `aagt-core`, `aagt-qmd`, `aagt-providers`, `aagt-macros`.
 - **Concurrency**: Async-first (Tokio), Thread-safe trait implementations.

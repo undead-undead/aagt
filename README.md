@@ -2,16 +2,13 @@
 
 > **The Rust-powered Application Framework for Autonomous Trading.**
 
-[![Crates.io](https://img.shields.io/crates/v/aagt-core.svg)](https://crates.io/crates/aagt-core)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-
 AAGT is a high-performance, production-ready framework designed to solve the "Dynamic-Static Conflict" in AI Agents. It combines Rust's uncompromising safety and performance with Python's rich AI ecosystem, positioning itself as a **Domain-Specific Application Framework** for quant trading.
 
 ---
 
-## 🏗️ System Architecture: The Quad-Core Engine
+## System Architecture: The Quad-Core Engine
 
-AAGT v0.2.3 is built on a modular architecture designed for extreme reliability and real-time orchestration.
+AAGT v0.2.5 is built on a modular architecture designed for extreme reliability and real-time orchestration.
 
 ### 1. The Guard (Rust Core)
 Rust's type-safety and ownership model provide the foundation for execution and safety.
@@ -36,7 +33,7 @@ Native integrations for real-world notifications and automated actions.
 
 ---
 
-## 🧠 Memory System (aagt-qmd)
+## Memory System (aagt-qmd)
 
 AAGT features a **Content-Addressable Hybrid Search** engine for deep historical reasoning:
 - **Namespaced Memory**: Isolated storage for different data categories (market, news, analysis).
@@ -45,7 +42,7 @@ AAGT features a **Content-Addressable Hybrid Search** engine for deep historical
 
 ---
 
-## 🛡️ Guardrails & Security
+## Guardrails & Security
 
 - **Risk Policies**: `DailyVolumeLimit`, `SingleTradeLimit`, and `SlippageCheck`.
 - **Sandbox Isolation**: Sidecar and DynamicSkill execution with optional containerization.
@@ -53,14 +50,14 @@ AAGT features a **Content-Addressable Hybrid Search** engine for deep historical
 
 ---
 
-## 🔌 Multi-Provider Support
+## Multi-Provider Support
 
 Native support for LLMs via a unified `Provider` trait:
 - OpenAI, Anthropic (Claude), Gemini, Groq, Groq, DeepSeek, and Ollama.
 
 ---
 
-## 🚀 Quick Start (v0.2.3)
+## Quick Start (v0.2.5)
 
 ```rust
 use aagt_core::prelude::*;
@@ -95,7 +92,7 @@ async fn main() -> Result<()> {
 
 ---
 
-## 📦 Packages
+## Packages
 
 Available on [crates.io](https://crates.io/search?q=aagt):
 - `aagt-core`: The heart of the framework.
@@ -105,11 +102,10 @@ Available on [crates.io](https://crates.io/search?q=aagt):
 
 ---
 
-## 💖 Support & License
+## Support & License
 - **License**: MIT / Apache 2.0
 - **Donate**: 
   - **Solana**: `9QFKQ3jpBSuNPLZQH1uq5GrJm4RDKue82zeVaXwazcmj`
   - **Base**: `0x4cf0b79aea1c229dfb1df9e2b40ea5dd04f37969`
 
-**Built by Traders, for Developers.**
 
