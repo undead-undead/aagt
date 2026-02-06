@@ -1,100 +1,99 @@
-# AAGT API Reference
+# AAGT API Reference (v0.2.3)
 
-AAGT (Advanced Agentic Trading) is organized into logical layers, balancing core stability with dynamic extension capabilities.
+AAGT is a modular framework organized into distinct layers, balancing core stability with high-speed extension capabilities.
 
 ---
 
-## Layer 1: Core Intelligence (aagt-core)
-The primarily interface for building and running AI Agents.
+## 🏗️ Layer 1: Core Orchestration (`aagt-core`)
 
-### AgentBuilder<P>
+The heart of the framework, providing the central execution and coordination logic.
+
+### `AgentBuilder<P>`
 Fluent interface for agent construction.
-- new(provider: P): Start a builder.
-- model(name) / system_prompt(text) / temperature(f64) / max_tokens(u64).
-- max_history_messages(n): Sets the sliding window size.
-- with_code_interpreter(): [NEW] Attaches the Python Sidecar capability.
-- with_memory_path(path): Connects the aagt-qmd hybrid search engine.
-- tool(T): Add a Rust-native tool (Skill).
-- approval_handler(H) / notifier(N).
+- `new(provider: P)`: Initialize with an LLM provider.
+- `model(name)` / `system_prompt(text)` / `temperature(f64)`.
+- `with_code_interpreter()`: Attaches the Python Sidecar (gRPC).
+- `with_memory_path(path)`: Connects the Tiered Memory system (Hot + Cold).
+- `with_message_bus(bus)`: [NEW] Subscribes the agent to a unified event stream.
+- `tool(T)` / `link_skill_loader(L)`: Add Rust-native or dynamic Python skills.
 
-### Agent<P>
-The central executor.
-- prompt(&self, text) -> anyhow::Result<String>: Send a single prompt.
-- chat(&self, messages: Vec<Message>) -> anyhow::Result<String>: Multi-turn chat.
-- stream(&self, text) -> Result<StreamingResponse>: Real-time token streaming.
-- undo(user_id, agent_id): Roll back the last interaction atomically.
-
----
-
-## Layer 2: Capability & Extension
-Bridges the Rust core to the external world via gRPC and sandbox execution.
-
-### Sidecar (gRPC Capability)
-Stateful, rich execution in Python.
-- SidecarManager: Manages the lifecycle of the Python ipykernel subprocess.
-- Sidecar::execute(code): Execute Python code and receive stdout, stderr, and images.
-
-
-### DynamicSkill
-Universal wrapper for python3, node, and bash skill types.
-- **Sandbox Integration**: Automatically uses `bwrap` (Bubblewrap) if available.
-- **Strict Mode**: If `allow_network` is false and `bwrap` is missing, execution is blocked.
+### `Agent<P>`
+The primary executor.
+- `prompt(&self, text)`: High-level single-turn interaction.
+- `chat(&self, messages)`: State-aware multi-turn conversation.
+- `stream(&self, text)`: Real-time token streaming.
+- `handler()`: Returns a `MessageBus` compatible async handler.
 
 ---
 
-## Layer 3: State & Memory
-Managing short-term context and long-term knowledge.
+## 📡 Layer 2: Message Routing (`aagt-core::bus`) [NEW]
 
-### ContextManager
-Gatekeeper for the LLM context window.
-- `build_context(history) -> Result<Vec<Message>>`: [SAFE] Applies RAG, windowing, and now uses `tiktoken-rs` for safe, soft pruning of history to prevent context overflow.
-- `estimate_tokens(messages) -> usize`: Returns accurate token count using BPE tokenizer.
+Unified event-driven communication layer.
 
-### MemoryManager
-- `with_qmd(path)`: Initialize with Hybrid Search storage.
-- `store(user, agent, msg)`: [TIERED] writes to ShortTermMemory (Hot), auto-archives to LongTermMemory (Cold) if > 20 items.
-- `retrieve_unified(user, agent, limit)`: [NEW] Seamlessly fetches message history from both Hot and Cold storage.
-- `search_history` (Tool): Agent-accessible BM25 history search.
-- `remember_this` (Tool): Agent-accessible insights persistence.
+### `MessageBus`
+Asynchronous message router for multi-agent/multi-channel coordination.
+- `subscribe(id, handler)`: Register an agent or channel.
+- `publish(msg)`: Broadcast a message to the target destination.
 
-### aagt-qmd (Hybrid Search Engine)
-- HybridSearchEngine: SQLite FTS5 (BM25) + optional HNSW (Vector).
-- engine.search(query, limit): Unified RRF retrieval.
+### `InboundMessage` / `OutboundMessage`
+Standardized schemas for agent communication, supporting text and media attachments.
 
 ---
 
-## 🛡️ Layer 4: Guardrails & Strategy (`RiskManager`)
-Ensuring trading safety and automated execution patterns.
+## 🧠 Layer 3: State & Memory (`aagt-core::knowledge`)
+
+High-performance storage for conversation and domain knowledge.
+
+### `MemoryManager` (Tiered Storage)
+- **Hot Tier (STM)**: Microsecond access via in-memory DashMap, persisted to atomic JSON.
+- **Cold Tier (LTM)**: Content-Addressable aagt-qmd engine (SQLite + Vector).
+- `retrieve_unified()`: Automatically merges history from both tiers.
+
+### `NamespacedMemory` [NEW]
+Isolation layer for specific data categories with TTL support.
+- `store(ns, key, val, ttl)`: Save data into a protected namespace (e.g., "market_depth").
+- `read(ns, key)`: Retrieval with automatic expiration checks.
+
+### `Union Search`
+- `search_unified()`: Simultaneous BM25 and Vector search with RRF re-ranking.
+
+---
+
+## 🛠️ Layer 4: Capability & Infrastructure (`aagt-core::skills`)
+
+Bridges the framework to external environments.
+
+### `Sidecar` (gRPC Capability)
+- Stateful code interpreter running in a dedicated Python ipykernel.
+- Supports persistent variables and library access (LangChain, Pandas).
+
+### `DynamicSkill` & `ClawHub`
+- `ClawHub`: Auto-discovery and loading of MCP-compatible Python tools.
+- **Security**: Sidecar and DynamicSkill are mutually exclusive per agent instance to prevent context pollution.
+
+### `TelegramNotifier` (`aagt-core::infra`) [NEW]
+- One-way notification channel via Telegram Bot API.
+- Integrated into the framework's alert system.
+
+---
+
+## 🛡️ Layer 5: Guardrails & Strategy (`aagt-core::trading`)
+
+Domain-specific logic for secure quant execution.
 
 ### `RiskManager`
 The safety filter for every action.
-- `check_and_reserve(context) -> Result<()>`: [ASYNC] atomic check and quota reservation.
-- `commit_trade(user_id, amount) -> Result<()>`: Confirm execution (updates daily stats).
-- `rollback_trade(user_id, amount)`: [NEW] Revert reservation on execution failure.
-- **RiskConfig**: `max_daily_volume_usd` (was daily_limit), `max_single_trade_usd`.
-- **Built-in Checks**: `SingleTradeLimit`, `DailyVolumeLimit` (Reset on Crash), `TokenSecurity`, `SlippageCheck`.
+- `check_and_reserve()`: Atomic quota reservation (Daily Volume, Single Trade).
+- `commit_trade()` / `rollback_trade()`: State confirmation for financial safety.
 
 ### `Strategy` & `Pipeline`
-- `Strategy::new(action, executor)`.
-- `PriceTrigger` / `CronTrigger`.
-- `Pipeline`: Orchestrates Detection ➔ Analysis ➔ Risk Check ➔ Execution.
+- Standardized loop for Market Detection ➔ AI Analysis ➔ Risk Check ➔ Execution.
 
 ---
 
-## 📡 Layer 5: Orchestration & UI
-Multi-agent coordination and event notifications.
+## 🔌 Framework Specifications
 
-### `Coordinator` (Multi-Agent)
-- `add_agent(role, agent)`.
-- `delegate(target, task)`: Inter-agent task handoff.
-- `broadcast(message)`.
+- **Crates**: `aagt-core`, `aagt-qmd`, `aagt-providers`, `aagt-macros`.
+- **Concurrency**: Async-first (Tokio), Thread-safe trait implementations.
+- **Distribution**: Licensed under MIT/Apache 2.0.
 
-### `Notifier` & `Events`
-- **Channels**: `Telegram`, `Discord`, `Email`, `Webhook`, `Terminal`.
-- **AgentEvents**: `Thinking`, `ToolCall`, `ApprovalPending`, `Response`, `Error`.
-
----
-
-## 🔌 Architecture Specs
-- **Crates**: `aagt-core`, `aagt-qmd`, `aagt-providers`, `aagt-macros`, `aagt-sidecar`.
-- **Patterns**: Strategy (Traits), Builder (Config), Facade (Agent), Bridge (gRPC).

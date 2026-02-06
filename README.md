@@ -1,81 +1,93 @@
 # AAGT: Advanced Agentic Trading Framework
 
-> **The Rust-powered Hybrid Intelligence System for Autonomous Trading.**
+> **The Rust-powered Application Framework for Autonomous Trading.**
 
-AAGT is a high-performance, production-ready framework designed to solve the "Dynamic-Static Conflict" in AI Agents. It combines Rust's uncompromising safety and performance with Python's rich AI ecosystem.
+[![Crates.io](https://img.shields.io/crates/v/aagt-core.svg)](https://crates.io/crates/aagt-core)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+
+AAGT is a high-performance, production-ready framework designed to solve the "Dynamic-Static Conflict" in AI Agents. It combines Rust's uncompromising safety and performance with Python's rich AI ecosystem, positioning itself as a **Domain-Specific Application Framework** for quant trading.
 
 ---
 
-## System Architecture: The Triple-Core Engine
+## 🏗️ System Architecture: The Quad-Core Engine
 
-AAGT is built on a modular "Triple-Core" architecture designed for high reliability, intelligence, and extreme extensibility.
+AAGT v0.2.3 is built on a modular architecture designed for extreme reliability and real-time orchestration.
 
-### 1. The Guard (Rust Core) | *The Body*
+### 1. The Guard (Rust Core)
 Rust's type-safety and ownership model provide the foundation for execution and safety.
-- **High-Performance**: Zero-cost abstractions and async-first design (Tokio) for low-latency decision making.
-- **Risk Management**: Pluggable safety checks (RiskManager) with native code execution.
-- **Context Management**: Advanced sliding window history management (ContextManager) to optimize reasoning and costs.
+- **High-Performance**: Zero-cost abstractions and async-first design (Tokio).
+- **Risk Management**: Pluggable `RiskManager` with atomic quota reservation.
+- **Tiered Memory**: Hot (hot-swappable STM) and Cold (SQLite/Vector LTM) storage tiers.
 
-### 2. The Thinker (Python gRPC Sidecar) | *The Brain*
+### 2. The Thinker (Python gRPC Sidecar)
 Offload intelligence to where it belongs—the world's most mature AI ecosystem.
-- **Stateful Code Interpreter**: Integrated Jupyter ipykernel allows the agent to maintain variables and state across multiple execution cells.
-- **Ecosystem Integration**: Seamless access to LangChain, NumPy, Pandas, and professional quantitative libraries via gRPC.
-- **Zero-Block Execution**: Ensures heavy ML reasoning doesn't block the critical trading execution loop.
+- **Stateful Code Interpreter**: Integrated Jupyter ipykernel for persistent data analysis.
+- **Ecosystem Integration**: Access LangChain, NumPy, and Pandas via high-speed gRPC.
 
+### 3. The Router (Message Bus) [NEW]
+Unified event routing for multi-channel communication.
+- **Asynchronous mpsc**: High-throughput message queuing between agents and channels.
+- **Unified Schema**: `InboundMessage` and `OutboundMessage` for seamless integration.
+
+### 4. The Bridge (Infrastructure) [NEW]
+Native integrations for real-world notifications and automated actions.
+- **Telegram Notifier**: Direct HTTP API integration for one-way alerts.
+- **Dynamic Skills**: Plugin-based tool system with security guardrails.
 
 ---
 
-## Memory System (aagt-qmd)
+## 🧠 Memory System (aagt-qmd)
 
 AAGT features a **Content-Addressable Hybrid Search** engine for deep historical reasoning:
-- **Dual-Layer Persistence**: 
-  - **Short-Term**: Atomic JSON (Temp-then-Replace) for microsecond session recovery.
-  - **Long-Term**: aagt-qmd Hybrid Search (BM25 + Vector) for token-efficient RAG (~90% savings).
-- **100x Faster Retrieval**: SQLite FTS5 backend ensures 5ms searches even with 100K+ historical documents.
-- **Privacy First**: Zero cloud dependencies. Your strategies and history stay on your infrastructure.
+- **Namespaced Memory**: Isolated storage for different data categories (market, news, analysis).
+- **Union Search**: Simultaneous keyword and vector search across Short-Term and Long-Term tiers.
+- **100x Faster Retrieval**: SQLite FTS5 backend ensures <5ms latency.
 
 ---
 
-## Guardrails & Security
+## 🛡️ Guardrails & Security
 
-AAGT is "Safe-by-Design":
-- **Risk Checks**: Built-in SingleTradeLimit, DailyVolumeLimit, HoneypotDetection, and SlippageCheck.
-- **Approval Policies**: Fine-grained control with Auto-Run vs Human-in-the-Loop (via Telegram/Discord/Webhooks).
-- **Isolation**: Physical and logical data separation between different User IDs and Agent IDs.
-
----
-
-## Multi-Provider Support
-
-Native support for LLMs via a unified Provider trait:
-- **Cloud**: OpenAI, Anthropic (Claude), Gemini.
-- **Fast Inference**: Groq (0.5s decision time).
-- **Privacy & Local**: Ollama.
-- **Open Standards**: OpenRouter, DeepSeek, Moonshot.
+- **Risk Policies**: `DailyVolumeLimit`, `SingleTradeLimit`, and `SlippageCheck`.
+- **Sandbox Isolation**: Sidecar and DynamicSkill execution with optional containerization.
+- **Mutual Exclusion**: Enhanced security model preventing context pollution between sidecars and local skills.
 
 ---
 
-##  Quick Start
+## 🔌 Multi-Provider Support
+
+Native support for LLMs via a unified `Provider` trait:
+- OpenAI, Anthropic (Claude), Gemini, Groq, Groq, DeepSeek, and Ollama.
+
+---
+
+## 🚀 Quick Start (v0.2.3)
 
 ```rust
 use aagt_core::prelude::*;
+use aagt_core::bus::MessageBus;
+use aagt_core::infra::TelegramNotifier;
 use aagt_providers::openai::OpenAI;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // 1. Initialize Intelligence
+async fn main() -> Result<()> {
+    // 1. Initialize Components
     let provider = OpenAI::from_env()?;
+    let bus = MessageBus::new();
+    let notifier = TelegramNotifier::new("TOKEN", "CHAT_ID");
 
-    // 2. Build Agent with Hybrid Capabilities
+    // 2. Build Agent with Unified Config
     let agent = Agent::builder(provider)
         .model("gpt-4o")
-        .with_code_interpreter()      // Stateful Python sidecar
-        .with_memory_path("data/")    // Hybrid search RAG
+        .with_code_interpreter()      // Python sidecar enabled
+        .with_memory_path("data/")    // Tiered RAG enabled
         .build()?;
 
-    // 3. Start Secure Execution
-    let response = agent.prompt("Analyze SOL/USDT market depth and plot a 14-day RSI.").await?;
-    println!("Agent Analysis: {}", response);
+    // 3. Connect to Message Bus
+    bus.subscribe(agent.id(), agent.handler()).await;
+    
+    // 4. Start Execution
+    let response = agent.prompt("Analyze BTC/USDT price action.").await?;
+    notifier.notify(&format!("Agent Analysis: {}", response)).await?;
 
     Ok(())
 }
@@ -83,10 +95,21 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
-## Support & License
+## 📦 Packages
+
+Available on [crates.io](https://crates.io/search?q=aagt):
+- `aagt-core`: The heart of the framework.
+- `aagt-providers`: LLM integrations.
+- `aagt-qmd`: Memory and Search engine.
+- `aagt-macros`: Developer ergonomics.
+
+---
+
+## 💖 Support & License
 - **License**: MIT / Apache 2.0
 - **Donate**: 
   - **Solana**: `9QFKQ3jpBSuNPLZQH1uq5GrJm4RDKue82zeVaXwazcmj`
   - **Base**: `0x4cf0b79aea1c229dfb1df9e2b40ea5dd04f37969`
 
 **Built by Traders, for Developers.**
+
