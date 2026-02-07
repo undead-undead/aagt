@@ -49,7 +49,7 @@ Native support for LLMs via a unified Provider trait:
 
 ---
 
-## Quick Start (v0.2.5)
+## Quick Start (v0.3.0)
 
 ```rust
 use aagt_core::prelude::*;

@@ -1,4 +1,4 @@
-# AAGT API Reference: Autonomous Agent Governance & Transport
+# AAGT API Reference (v0.3.0): Autonomous Agent Governance & Transport
 
 AAGT is a modular framework organized into distinct layers, balancing core stability with high-speed extension capabilities for autonomous agents.
 
