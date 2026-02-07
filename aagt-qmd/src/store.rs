@@ -154,6 +154,16 @@ impl QmdStore {
         // Triggers to keep FTS in sync with documents
         self.create_fts_triggers_internal(&conn)?;
 
+        // Sessions table for agent state persistence
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         info!("QMD schema initialized successfully");
         Ok(())
     }
@@ -590,6 +600,52 @@ impl QmdStore {
             "UPDATE documents SET summary = ? WHERE collection = ? AND path = ?",
             params![summary, collection, path],
         )?;
+
+        Ok(())
+    }
+
+    /// Store an agent session (JSON blob)
+    pub fn store_session(&self, id: &str, data: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| QmdError::Custom("Lock poisoned".to_string()))?;
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (id, data, updated_at) VALUES (?, ?, ?)",
+            params![id, data, now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Load an agent session
+    pub fn load_session(&self, id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| QmdError::Custom("Lock poisoned".to_string()))?;
+
+        let data: Option<String> = conn
+            .query_row(
+                "SELECT data FROM sessions WHERE id = ?",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        Ok(data)
+    }
+
+    /// Delete a session
+    pub fn delete_session(&self, id: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| QmdError::Custom("Lock poisoned".to_string()))?;
+
+        conn.execute("DELETE FROM sessions WHERE id = ?", params![id])?;
 
         Ok(())
     }

@@ -29,6 +29,12 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
     /// TypeScript interface definition (Preferred for System Prompt)
     pub parameters_ts: Option<String>,
+    /// Whether this is a binary tool (e.g. Wasm)
+    #[serde(default)]
+    pub is_binary: bool,
+    /// Whether the tool is verified/trusted
+    #[serde(default)]
+    pub is_verified: bool,
 }
 
 /// Trait for implementing tools that AI agents can call
@@ -48,6 +54,8 @@ pub trait Tool: Send + Sync {
 #[derive(Clone)]
 pub struct ToolSet {
     tools: HashMap<String, Arc<dyn Tool>>,
+    /// Cached definitions to avoid async calls during prompt generation
+    cached_definitions: Arc<parking_lot::RwLock<HashMap<String, ToolDefinition>>>,
 }
 
 impl Default for ToolSet {
@@ -61,6 +69,7 @@ impl ToolSet {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            cached_definitions: Arc::new(parking_lot::RwLock::new(HashMap::new())),
         }
     }
 
@@ -89,8 +98,19 @@ impl ToolSet {
     /// Get all tool definitions
     pub async fn definitions(&self) -> Vec<ToolDefinition> {
         let mut defs = Vec::new();
-        for tool in self.tools.values() {
-            defs.push(tool.definition().await);
+        for (name, tool) in &self.tools {
+            // Check cache in a small block to ensure guard is dropped
+            let cached = {
+                self.cached_definitions.read().get(name).cloned()
+            };
+
+            if let Some(def) = cached {
+                defs.push(def);
+            } else {
+                let def = tool.definition().await;
+                self.cached_definitions.write().insert(name.clone(), def.clone());
+                defs.push(def);
+            }
         }
         defs
     }
@@ -121,8 +141,9 @@ impl ToolSet {
     }
 }
 
+#[async_trait::async_trait]
 impl crate::agent::context::ContextInjector for ToolSet {
-    fn inject(&self) -> crate::error::Result<Vec<crate::agent::message::Message>> {
+    async fn inject(&self) -> crate::error::Result<Vec<crate::agent::message::Message>> {
         if self.tools.is_empty() {
             return Ok(Vec::new());
         }
@@ -135,10 +156,17 @@ impl crate::agent::context::ContextInjector for ToolSet {
         sorted_tools.sort_by_key(|(k, _)| *k);
 
         for (name, tool) in sorted_tools {
-            // We use block_on because Tool::definition is currently async
-            // and ContextInjector::inject is sync.
-            // In a more refined architecture, we would cache these definitions.
-            let def = futures::executor::block_on(tool.definition());
+            let cached_def = {
+                self.cached_definitions.read().get(name).cloned()
+            };
+
+            let def = if let Some(d) = cached_def {
+                d
+            } else {
+                let d = tool.definition().await;
+                self.cached_definitions.write().insert(name.clone(), d.clone());
+                d
+            };
             
             content.push_str(&format!("### {}\n{}\n", name, def.description));
             if let Some(ts) = def.parameters_ts {
@@ -271,6 +299,9 @@ mod tests {
                     },
                     "required": ["message"]
                 }),
+                parameters_ts: None,
+                is_binary: false,
+                is_verified: true, // Internal tools are verified
             }
         }
 

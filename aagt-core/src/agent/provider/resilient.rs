@@ -5,9 +5,7 @@ use async_trait::async_trait;
 use tracing::{info, warn};
 
 use crate::error::Result;
-use crate::agent::message::Message;
 use crate::agent::provider::Provider;
-use crate::skills::tool::ToolDefinition;
 use crate::agent::streaming::StreamingResponse;
 
 /// Configuration for the Circuit Breaker
@@ -120,13 +118,7 @@ impl<P: Provider, F: Provider> Provider for ResilientProvider<P, F> {
 
     async fn stream_completion(
         &self,
-        model: &str,
-        system_prompt: Option<&str>,
-        messages: Vec<Message>,
-        tools: Vec<ToolDefinition>,
-        temperature: Option<f64>,
-        max_tokens: Option<u64>,
-        extra_params: Option<serde_json::Value>,
+        request: crate::agent::provider::ChatRequest,
     ) -> Result<StreamingResponse> {
         let state = self.check_state().await;
         
@@ -141,9 +133,7 @@ impl<P: Provider, F: Provider> Provider for ResilientProvider<P, F> {
             // Attempt Primary with Timeout
             match tokio::time::timeout(
                 self.config.request_timeout,
-                self.primary.stream_completion(
-                    model, system_prompt, messages.clone(), tools.clone(), temperature, max_tokens, extra_params.clone()
-                )
+                self.primary.stream_completion(request.clone())
             ).await {
                 Ok(Ok(response)) => {
                     self.report_success().await;
@@ -164,11 +154,6 @@ impl<P: Provider, F: Provider> Provider for ResilientProvider<P, F> {
 
         // Fallback Logic
         info!("Using Fallback Provider: {}", self.fallback.name());
-        
-        // Note: We might want a different model name for fallback, but for now we pass the same Request.
-        // In a real scenario, ResilientProvider might need a mapping or the fallback provider ignores the model param.
-        self.fallback.stream_completion(
-             model, system_prompt, messages, tools, temperature, max_tokens, extra_params
-        ).await
+        self.fallback.stream_completion(request).await
     }
 }

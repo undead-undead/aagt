@@ -11,30 +11,34 @@ mod resilient;
 
 pub use resilient::{ResilientProvider, CircuitBreakerConfig};
 
+/// Request for a chat completion
+#[derive(Debug, Clone, Default)]
+pub struct ChatRequest {
+    /// Model name to use
+    pub model: String,
+    /// Optional system prompt
+    pub system_prompt: Option<String>,
+    /// Conversation history
+    pub messages: Vec<Message>,
+    /// Available tools
+    pub tools: Vec<ToolDefinition>,
+    /// Optional temperature setting
+    pub temperature: Option<f64>,
+    /// Optional max tokens
+    pub max_tokens: Option<u64>,
+    /// Optional provider-specific parameters
+    pub extra_params: Option<serde_json::Value>,
+}
+
 /// Trait for LLM providers
 ///
 /// Implement this trait to add support for a new LLM provider.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Stream a completion request
-    ///
-    /// # Arguments
-    /// * `model` - Model name to use
-    /// * `system_prompt` - Optional system prompt
-    /// * `messages` - Conversation history
-    /// * `tools` - Available tools (empty if none)
-    /// * `temperature` - Optional temperature setting
-    /// * `max_tokens` - Optional max tokens
-    /// * `extra_params` - Optional provider-specific parameters
     async fn stream_completion(
         &self,
-        model: &str,
-        system_prompt: Option<&str>,
-        messages: Vec<Message>,
-        tools: Vec<ToolDefinition>,
-        temperature: Option<f64>,
-        max_tokens: Option<u64>,
-        extra_params: Option<serde_json::Value>,
+        request: ChatRequest,
     ) -> Result<StreamingResponse>;
 
     /// Get provider name (for logging/debugging)

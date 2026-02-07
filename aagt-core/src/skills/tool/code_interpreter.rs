@@ -51,6 +51,8 @@ impl Tool for CodeInterpreter {
                 "required": ["code"]
             }),
             parameters_ts: Some("interface CodeArgs {\n  code: string; // Python code to execute\n}".to_string()),
+            is_binary: false,
+            is_verified: true,
         }
     }
 

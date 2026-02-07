@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod context;
 pub mod core;
 pub mod memory;
@@ -7,7 +8,10 @@ pub mod namespaced_memory; // NEW: Namespaced shared memory
 pub mod personality;
 pub mod provider;
 pub mod scheduler;
+pub mod session;
 pub mod streaming;
 
 pub use core::{Agent, AgentBuilder, AgentConfig};
-pub use namespaced_memory::{MemoryEntry, NamespacedMemory}; // NEW
+pub use namespaced_memory::{MemoryEntry, NamespacedMemory};
+pub use session::{AgentSession, SessionStatus};
+// NEW

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use tracing::info;
 
 use crate::error::{Error, Result};
 use crate::agent::scheduler::Scheduler;
@@ -68,6 +69,8 @@ pub enum MessageType {
     Approval,
     /// Denial response
     Denial,
+    /// Handover to another agent
+    Handover,
 }
 
 /// Trait for agents that can participate in multi-agent systems
@@ -185,12 +188,13 @@ impl Coordinator {
 
         // 1. Initial processing by lead agent
         let mut current_result = lead.process(task).await?;
+        let mut current_role = lead_role.clone();
 
-        // 2. Pass result through the rest of the workflow chain
-        for (i, role) in workflow.iter().enumerate().skip(1) {
-            if let Some(agent) = self.get(role) {
-                // Determine message type based on position in chain
-                // Last agent usually gives final approval/response
+        // 2. Pass result through the rest of the workflow chain OR follow handovers
+        let mut i = 1;
+        while i < workflow.len() {
+            let next_role = &workflow[i];
+            if let Some(agent) = self.get(next_role) {
                 let msg_type = if i == workflow.len() - 1 {
                     MessageType::Approval
                 } else {
@@ -198,28 +202,46 @@ impl Coordinator {
                 };
 
                 let message = AgentMessage {
-                    from: workflow[i-1].clone(),
-                    to: Some(role.clone()),
+                    from: current_role.clone(),
+                    to: Some(next_role.clone()),
                     content: current_result.clone(),
                     msg_type,
                 };
 
                 if let Some(response) = agent.handle_message(message).await? {
+                    // Check for Handover
+                    if matches!(response.msg_type, MessageType::Handover) {
+                        // Dynamic handover: the agent specifies the next role in the content or target
+                        if let Some(handover_to) = response.to {
+                             // If target is specified, we diverted from static workflow
+                             if let Some(_handover_agent) = self.get(&handover_to) {
+                                 info!("Dynamic Handover from {:?} to {:?}", next_role, handover_to);
+                                 current_result = response.content;
+                                 current_role = handover_to;
+                                 // We don't increment i here, we stay in the loop to process the handover
+                                 // To prevent infinite loops, we should have a max_rounds check
+                                 continue; 
+                             }
+                        }
+                    }
+
                     // Check for strict denial/stop signal
                     if matches!(response.msg_type, MessageType::Denial) {
                         return Err(Error::AgentCoordination(format!(
                             "Agent {:?} denied processing: {}",
-                            role, response.content
+                            next_role, response.content
                         )));
                     }
                     current_result = response.content;
                 }
+                current_role = next_role.clone();
             } else {
                 return Err(Error::AgentCoordination(format!(
                     "Workflow failed: Agent {:?} not found",
-                    role
+                    next_role
                 )));
             }
+            i += 1;
         }
 
         Ok(current_result)

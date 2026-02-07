@@ -2,7 +2,6 @@
 
 use super::{RiskCheck, RiskCheckResult, TradeContext};
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use std::sync::Arc;
 
 /// Maximum trade amount check

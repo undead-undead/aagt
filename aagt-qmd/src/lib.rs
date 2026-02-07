@@ -106,6 +106,7 @@
 //! - **full**: FTS + Vector (recommended for production)
 
 // Phase 1 modules (always available)
+pub mod agent_memory;
 pub mod content_hash;
 pub mod error;
 pub mod store;
@@ -125,6 +126,7 @@ pub mod embedder;
 pub mod vector_store;
 
 // Re-exports: Phase 1
+pub use agent_memory::QmdMemory;
 pub use content_hash::{get_docid, hash_content, normalize_docid, validate_docid};
 pub use error::{QmdError, Result};
 pub use store::{Collection, Document, QmdStore, SearchResult, StoreStats};

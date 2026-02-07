@@ -67,6 +67,37 @@ impl TelegramNotifier {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::infra::observable::AgentObserver for TelegramNotifier {
+    async fn on_event(&self, event: &crate::agent::core::AgentEvent) -> crate::error::Result<()> {
+        use crate::agent::core::AgentEvent;
+        
+        let message = match event {
+            AgentEvent::Thinking { prompt } => {
+                format!("─── *thinking* ───\n`{}`", prompt)
+            }
+            AgentEvent::ToolCall { tool, input } => {
+                format!("─── *tool call* ───\n*target:* `{}`\n*input:* `{}`", tool, input)
+            }
+            AgentEvent::ToolResult { tool, output } => {
+                let preview = if output.len() > 100 { format!("{}...", &output[..100]) } else { output.clone() };
+                format!("─── *tool result* ───\n*target:* `{}`\n*output:* `{}`", tool, preview)
+            }
+            AgentEvent::ApprovalPending { tool, input } => {
+                format!("─── *approval required* ───\n*target:* `{}`\n*input:* `{}`", tool, input)
+            }
+            AgentEvent::Response { content } => {
+                format!("─── *response* ───\n{}", content)
+            }
+            AgentEvent::Error { message } => {
+                format!("─── *error* ───\n{}", message)
+            }
+        };
+
+        self.notify(&message).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

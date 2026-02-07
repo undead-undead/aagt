@@ -66,9 +66,9 @@ impl OpenAI {
     }
 }
 
-/// OpenAI chat completion request
+/// OpenAI chat completion request (Internal API structure)
 #[derive(Debug, Serialize)]
-struct ChatRequest {
+struct OpenAIChatRequest {
     model: String,
     messages: Vec<OpenAIMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -299,14 +299,18 @@ impl OpenAI {
 impl Provider for OpenAI {
     async fn stream_completion(
         &self,
-        model: &str,
-        system_prompt: Option<&str>,
-        messages: Vec<Message>,
-        tools: Vec<ToolDefinition>,
-        temperature: Option<f64>,
-        max_tokens: Option<u64>,
-        extra_params: Option<serde_json::Value>,
+        request: aagt_core::agent::provider::ChatRequest,
     ) -> Result<StreamingResponse> {
+        let aagt_core::agent::provider::ChatRequest {
+            model,
+            system_prompt,
+            messages,
+            tools,
+            temperature,
+            max_tokens,
+            extra_params,
+        } = request;
+
         // Check for response_format in extra_params
         let response_format = if let Some(params) = &extra_params {
             if let Some(format_val) = params.get("response_format") {
@@ -318,13 +322,13 @@ impl Provider for OpenAI {
             None
         };
 
-        let mut request_messages = Self::convert_messages(system_prompt, messages);
+        let request_messages = Self::convert_messages(system_prompt.as_deref(), messages);
 
         // If tools have TS interfaces, we might want to prioritize them.
         // For OpenAI, we still MUST send the JSON schema in the `tools` parameter.
         // However, we can enhance the system prompt or tool descriptions.
         
-        let request = ChatRequest {
+        let api_request = OpenAIChatRequest {
             model: model.to_string(),
             messages: request_messages,
             temperature,
@@ -338,7 +342,7 @@ impl Provider for OpenAI {
             .client
             .post(format!("{}/chat/completions", self.base_url))
             .headers(self.build_headers()?)
-            .json(&request)
+            .json(&api_request)
             .send()
             .await?;
 

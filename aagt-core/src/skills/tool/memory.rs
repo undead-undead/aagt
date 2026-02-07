@@ -42,6 +42,8 @@ impl Tool for SearchHistoryTool {
                 "required": ["query"]
             }),
             parameters_ts: Some("interface SearchArgs {\n  query: string; // The search query\n  limit?: number; // Max results (default: 5)\n}".to_string()),
+            is_binary: false,
+            is_verified: true,
         }
     }
 
@@ -132,6 +134,8 @@ impl Tool for RememberThisTool {
                 "required": ["title", "content"]
             }),
             parameters_ts: Some("interface RememberArgs {\n  title: string; // Short title\n  content: string; // Detail information\n  collection?: string; // Category (default: 'general')\n}".to_string()),
+            is_binary: false,
+            is_verified: true,
         }
     }
 
@@ -192,6 +196,8 @@ impl Tool for TieredSearchTool {
                 "required": ["query"]
             }),
             parameters_ts: Some("interface TieredSearchArgs {\n  query: string;\n  limit?: number;\n}".to_string()),
+            is_binary: false,
+            is_verified: true,
         }
     }
 
@@ -254,6 +260,8 @@ impl Tool for FetchDocumentTool {
                 "required": ["collection", "path"]
             }),
             parameters_ts: Some("interface FetchArgs {\n  collection: string;\n  path: string;\n}".to_string()),
+            is_binary: false,
+            is_verified: true,
         }
     }
 

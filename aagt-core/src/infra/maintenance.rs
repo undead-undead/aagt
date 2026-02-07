@@ -3,18 +3,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::agent::memory::ShortTermMemory;
-use crate::knowledge::store::file::FileStore;
 
 /// Configuration for background tasks
 #[derive(Debug, Clone)]
 pub struct MaintenanceConfig {
     /// Interval for memory cleanup (in seconds)
     pub memory_cleanup_interval_secs: u64,
-    /// Interval for file store compaction (in seconds)
-    pub file_compaction_interval_secs: u64,
     /// Inactive timeout for short-term memory (in seconds)
     pub memory_inactive_timeout_secs: u64,
 }
@@ -23,7 +20,6 @@ impl Default for MaintenanceConfig {
     fn default() -> Self {
         Self {
             memory_cleanup_interval_secs: 300, // 5 minutes
-            file_compaction_interval_secs: 3600, // 1 hour
             memory_inactive_timeout_secs: 3600, // 1 hour
         }
     }
@@ -61,27 +57,6 @@ impl MaintenanceManager {
         self.tasks.push(handle);
     }
 
-    /// Start file store compaction task
-    pub fn start_file_compaction(
-        &mut self,
-        store: Arc<FileStore>,
-        config: MaintenanceConfig,
-    ) {
-        let handle = tokio::spawn(async move {
-            let interval = Duration::from_secs(config.file_compaction_interval_secs);
-            
-            loop {
-                tokio::time::sleep(interval).await;
-                info!("Running scheduled file store compaction");
-                
-                // Auto-compact if appropriate
-                if let Err(e) = store.auto_compact(1000).await {
-                    warn!("File store compaction failed: {}", e);
-                }
-            }
-        });
-        self.tasks.push(handle);
-    }
 
     /// Shutdown all background tasks
     pub async fn shutdown(self) {

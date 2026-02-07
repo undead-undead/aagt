@@ -4,6 +4,7 @@
 //! via Telegram, Discord, and Email (via webhook/API).
 
 use anyhow::Result;
+#[cfg(feature = "trading")]
 use crate::trading::pipeline::{Context, Step};
 use async_trait::async_trait;
 use serde_json::json;
@@ -32,6 +33,7 @@ impl TelegramStep {
         }
     }
 
+    #[cfg(feature = "trading")]
     fn format_message(&self, ctx: &Context) -> String {
         let mut msg = self.message_template.clone();
         // Simple interpolation: replace {key} with value from ctx.data
@@ -54,6 +56,7 @@ impl TelegramStep {
     }
 }
 
+#[cfg(feature = "trading")]
 #[async_trait]
 impl Step for TelegramStep {
     async fn execute(&self, ctx: &mut Context) -> Result<()> {
@@ -105,6 +108,7 @@ impl DiscordStep {
         self
     }
     
+    #[cfg(feature = "trading")]
     fn format_message(&self, ctx: &Context) -> String {
         // Reuse logic or abstract it later. For now, duplication is fine for simplicity.
         let mut msg = self.message_template.clone();
@@ -126,6 +130,7 @@ impl DiscordStep {
     }
 }
 
+#[cfg(feature = "trading")]
 #[async_trait]
 impl Step for DiscordStep {
     async fn execute(&self, ctx: &mut Context) -> Result<()> {
@@ -199,6 +204,7 @@ impl EmailStep {
     }
 }
 
+#[cfg(feature = "trading")]
 #[async_trait]
 impl Step for EmailStep {
     async fn execute(&self, ctx: &mut Context) -> Result<()> {

@@ -50,6 +50,8 @@ impl Tool for DelegateTool {
                 "required": ["role", "task"]
             }),
             parameters_ts: Some("interface DelegateArgs {\n  role: 'researcher' | 'trader' | 'risk_analyst' | 'strategist' | 'assistant';\n  task: string; // Instructions for the sub-agent\n}".to_string()),
+            is_binary: false,
+            is_verified: true,
         }
     }
 

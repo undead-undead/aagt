@@ -2,20 +2,22 @@
 
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{info, instrument, error};
+use tracing::{info, instrument, error, debug};
 use anyhow;
 
 use crate::error::{Error, Result};
 use crate::agent::context::ContextInjector;
 use crate::agent::message::{Message, Role, Content};
 use crate::agent::provider::Provider;
+use crate::agent::memory::Memory;
+use crate::agent::session::SessionStatus;
 use crate::skills::tool::{Tool, ToolSet};
 use crate::agent::streaming::StreamingResponse;
 use crate::skills::tool::memory::{SearchHistoryTool, RememberThisTool, TieredSearchTool, FetchDocumentTool}; // Corrected import for memory tools
-use crate::agent::memory::MemoryManager;
 use crate::agent::context::{ContextManager, ContextConfig}; // ContextInjector is already imported above
 use crate::agent::multi_agent::{Coordinator, AgentRole, MultiAgent, AgentMessage};
 use crate::agent::personality::{Persona, PersonalityManager};
+use crate::agent::cache::Cache;
 use crate::agent::scheduler::Scheduler;
 use crate::skills::tool::{DelegateTool, CronTool};
 use crate::infra::notification::{Notifier, NotifyChannel};
@@ -47,6 +49,8 @@ pub struct AgentConfig {
     pub persona: Option<Persona>,
     /// Role of the agent in a multi-agent system
     pub role: AgentRole,
+    /// Max parallel tool calls (default: 5)
+    pub max_parallel_tools: usize,
 }
 
 impl Default for AgentConfig {
@@ -64,6 +68,7 @@ impl Default for AgentConfig {
             json_mode: false,
             persona: None,
             role: AgentRole::Assistant,
+            max_parallel_tools: 5,
         }
     }
 }
@@ -151,6 +156,50 @@ pub struct ChannelApprovalHandler {
     sender: tokio::sync::mpsc::Sender<ApprovalRequest>,
 }
 
+/// Trait for human-in-the-loop interactions (getting text input)
+#[async_trait::async_trait]
+pub trait InteractionHandler: Send + Sync {
+    /// Ask the user a question and get a string response
+    async fn ask(&self, question: &str) -> anyhow::Result<String>;
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct AskUserArgs {
+    /// The question to ask the user
+    question: String,
+}
+
+struct AskUserTool {
+    handler: Arc<dyn InteractionHandler>,
+}
+
+#[async_trait::async_trait]
+impl crate::skills::tool::Tool for AskUserTool {
+    fn name(&self) -> String {
+        "ask_user".to_string()
+    }
+
+    async fn definition(&self) -> crate::skills::tool::ToolDefinition {
+        let gen = schemars::gen::SchemaSettings::openapi3().into_generator();
+        let schema = gen.into_root_schema_for::<AskUserArgs>();
+        let schema_json = serde_json::to_value(schema).unwrap_or_default();
+
+        crate::skills::tool::ToolDefinition {
+            name: "ask_user".to_string(),
+            description: "Ask the user for clarification, additional information, or a final decision. Use this when you are stuck or need human input.".to_string(),
+            parameters: schema_json,
+            parameters_ts: Some("interface AskUserArgs {\n  /** The question to ask the user */\n  question: string;\n}".to_string()),
+            is_binary: false,
+            is_verified: true,
+        }
+    }
+
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
+        let args: AskUserArgs = serde_json::from_str(arguments)?;
+        self.handler.ask(&args.question).await
+    }
+}
+
 impl ChannelApprovalHandler {
     /// Create a new channel handler
     pub fn new(sender: tokio::sync::mpsc::Sender<ApprovalRequest>) -> Self {
@@ -191,7 +240,10 @@ pub struct Agent<P: Provider> {
     context_manager: ContextManager,
     events: broadcast::Sender<AgentEvent>,
     approval_handler: Arc<dyn ApprovalHandler>,
+    cache: Option<Arc<dyn Cache>>,
     notifier: Option<Arc<dyn Notifier>>,
+    memory: Option<Arc<dyn Memory>>,
+    session_id: Option<String>,
 }
 
 impl<P: Provider> Agent<P> {
@@ -221,6 +273,34 @@ impl<P: Provider> Agent<P> {
              tracing::warn!("Agent tried to notify but no notifier is configured: {}", message);
              Ok(())
         }
+    }
+
+    /// Save current state to persistent storage
+    pub async fn checkpoint(&self, messages: &[Message], step: usize, status: SessionStatus) -> Result<()> {
+        if let (Some(memory), Some(session_id)) = (&self.memory, &self.session_id) {
+            let session = crate::agent::session::AgentSession {
+                id: session_id.clone(),
+                messages: messages.to_vec(),
+                step,
+                status,
+                updated_at: chrono::Utc::now(),
+            };
+            memory.store_session(session).await?;
+            debug!("Agent checkpoint saved for session: {}", session_id);
+        }
+        Ok(())
+    }
+
+    /// Resume a previously saved session
+    pub async fn resume(&self, session_id: &str) -> Result<String> {
+        if let Some(memory) = &self.memory {
+            if let Some(session) = memory.retrieve_session(session_id).await? {
+                info!("Resuming agent session: {}", session_id);
+                // We restart the chat with the loaded messages
+                return self.chat(session.messages).await;
+            }
+        }
+        Err(Error::Internal(format!("Session not found: {}", session_id)))
     }
 
     /// Send a prompt and get a response (non-streaming)
@@ -254,10 +334,21 @@ impl<P: Provider> Agent<P> {
                  }
             }
 
+            // Save checkpoint before thinking
+            self.checkpoint(&messages, steps, SessionStatus::Thinking).await?;
+
             info!("Agent starting chat completion (step {})", steps);
 
+            // 1. Check Cache (Step-level caching)
+            if let Some(cache) = &self.cache {
+                if let Ok(Some(cached_response)) = cache.get(&messages).await {
+                    info!("Cache hit! Returning cached response.");
+                    return Ok(cached_response);
+                }
+            }
+
             // Context Window Management via ContextManager
-            let context_messages = self.context_manager.build_context(&messages)
+            let context_messages = self.context_manager.build_context(&messages).await
                 .map_err(|e| Error::agent_config(format!("Failed to build context: {}", e)))?;
 
             let stream = self.stream_chat(context_messages).await?;
@@ -291,6 +382,12 @@ impl<P: Provider> Agent<P> {
             // If no tool calls, we are done
             if tool_calls.is_empty() {
                 self.emit(AgentEvent::Response { content: full_text.clone() });
+                
+                // Store in cache
+                if let Some(cache) = &self.cache {
+                    let _ = cache.set(&messages, full_text.clone()).await;
+                }
+                
                 return Ok(full_text);
             }
 
@@ -313,86 +410,108 @@ impl<P: Provider> Agent<P> {
                 content: Content::Parts(parts),
             });
 
-            // 2. Execute Tools (Parallel)
+            // 2. Execute Tools (Parallel with Limit)
             let tools = &self.tools;
             let policy = &self.config.tool_policy;
             let events = &self.events;
             let approval_handler = &self.approval_handler;
+            let max_parallel = self.config.max_parallel_tools;
             
-            let mut futures = Vec::new();
+            use futures::stream;
             
-            for (id, name, args) in tool_calls {
-                let name_clone = name.clone();
-                let id_clone = id.clone();
-                let args_str = args.to_string();
-                
-                futures.push(async move {
-                    // Check policy
-                    let effective_policy = policy.overrides.get(&name_clone)
-                        .unwrap_or(&policy.default_policy);
+            let current_messages = Arc::new(messages.clone());
+            
+            let results: Vec<crate::error::Result<(String, String, String)>> = stream::iter(tool_calls)
+                .map(|(id, name, args)| {
+                    let name_clone = name.clone();
+                    let id_clone = id.clone();
+                    let args_str = args.to_string();
+                    let msgs = Arc::clone(&current_messages);
                     
-                    let result = match effective_policy {
-                        ToolPolicy::Disabled => {
-                            Err(Error::tool_execution(name_clone.clone(), "Tool execution is disabled by policy".to_string()))
-                        }
-                        ToolPolicy::RequiresApproval => {
-                            let _ = events.send(AgentEvent::ApprovalPending { 
-                                tool: name_clone.clone(), 
-                                input: args_str.clone() 
-                            });
-                            
-                            // Ask approval handler
-                            match approval_handler.approve(&name_clone, &args_str).await {
-                                Ok(true) => {
-                                    // Approved! Proceed to auto
-                                    let _ = events.send(AgentEvent::ToolCall { 
-                                        tool: name_clone.clone(), 
-                                        input: args_str.clone() 
-                                    });
-                                    tools.call(&name_clone, &args_str).await
-                                        .map_err(|e| Error::tool_execution(name_clone.clone(), e.to_string()))
-                                }
-                                Ok(false) => {
-                                    Err(Error::ToolApprovalRequired { tool_name: name_clone.clone() })
-                                }
-                                Err(e) => {
-                                    Err(Error::tool_execution(name_clone.clone(), format!("Approval check failed: {}", e)))
-                                }
+                    async move {
+                        // 1. Get tool definition (cached in ToolSet)
+                        let tool_ref = tools.get(&name_clone).ok_or_else(|| Error::ToolNotFound(name_clone.clone()))?;
+                        
+                        let def = tool_ref.definition().await;
+
+                        // 2. Check policy and security overrides
+                        let mut effective_policy = policy.overrides.get(&name_clone)
+                            .unwrap_or(&policy.default_policy).clone();
+                        
+                        // Binary Safety Override: Unverified binary skills ALWAYS require approval
+                        if def.is_binary && !def.is_verified {
+                            if effective_policy != ToolPolicy::Disabled {
+                                tracing::warn!(tool = %name_clone, "Unverified binary skill detected. Enforcing manual approval.");
+                                effective_policy = ToolPolicy::RequiresApproval;
                             }
                         }
-                        ToolPolicy::Auto => {
-                            let _ = events.send(AgentEvent::ToolCall { 
-                                tool: name_clone.clone(), 
-                                input: args_str.clone() 
-                            });
-                            // internal tool call returns anyhow::Result
-                            tools.call(&name_clone, &args_str).await
-                                .map_err(|e| Error::tool_execution(name_clone.clone(), e.to_string()))
-                        }
-                    };
-                    
-                    let output = match result {
-                        Ok(s) => {
-                            let _ = events.send(AgentEvent::ToolResult { 
-                                tool: name_clone.clone(), 
-                                output: s.clone() 
-                            });
-                            s
-                        }
-                        Err(e) => {
-                            let _ = events.send(AgentEvent::Error { message: e.to_string() });
-                            format!("Error: {}", e)
-                        }
-                    };
 
-                    (id_clone, output, name_clone)
-                });
-            }
-            
-            let results = futures::future::join_all(futures).await;
+                        let result = match effective_policy {
+                            ToolPolicy::Disabled => {
+                                Err(Error::tool_execution(name_clone.clone(), "Tool execution is disabled by policy".to_string()))
+                            }
+                            ToolPolicy::RequiresApproval => {
+                                let _ = events.send(AgentEvent::ApprovalPending { 
+                                    tool: name_clone.clone(), 
+                                    input: args_str.clone() 
+                                });
+                                
+                                // Checkpoint before awaiting approval
+                                self.checkpoint(&msgs, steps, SessionStatus::AwaitingApproval { 
+                                    tool_name: name_clone.clone(), 
+                                    arguments: args_str.clone() 
+                                }).await?;
+
+                                // Ask approval handler
+                                match approval_handler.approve(&name_clone, &args_str).await {
+                                    Ok(true) => {
+                                        let _ = events.send(AgentEvent::ToolCall { 
+                                            tool: name_clone.clone(), 
+                                            input: args_str.clone() 
+                                        });
+                                        tools.call(&name_clone, &args_str).await
+                                            .map_err(|e| Error::tool_execution(name_clone.clone(), e.to_string()))
+                                    }
+                                    Ok(false) => {
+                                        Err(Error::ToolApprovalRequired { tool_name: name_clone.clone() })
+                                    }
+                                    Err(e) => {
+                                        Err(Error::tool_execution(name_clone.clone(), format!("Approval check failed: {}", e)))
+                                    }
+                                }
+                            }
+                            ToolPolicy::Auto => {
+                                let _ = events.send(AgentEvent::ToolCall { 
+                                    tool: name_clone.clone(), 
+                                    input: args_str.clone() 
+                                });
+                                tools.call(&name_clone, &args_str).await
+                                    .map_err(|e| Error::tool_execution(name_clone.clone(), e.to_string()))
+                            }
+                        };
+                        
+                        match result {
+                            Ok(output) => {
+                                let _ = events.send(AgentEvent::ToolResult { 
+                                    tool: name_clone.clone(), 
+                                    output: output.clone() 
+                                });
+                                Ok((id_clone, name_clone, output))
+                            },
+                            Err(e) => {
+                                let _ = events.send(AgentEvent::Error { message: e.to_string() });
+                                Ok((id_clone, name_clone, format!("Error: {}", e)))
+                            }
+                        }
+                    }
+                })
+                .buffer_unordered(max_parallel)
+                .collect()
+                .await;
 
             // 3. Append Tool Results to history
-            for (id, output, name) in results {
+            for res in results {
+                let (id, name, output) = res.unwrap(); // Safe because we handle Err inside async move
                  messages.push(Message {
                     role: Role::Tool,
                     name: None,
@@ -425,17 +544,17 @@ impl<P: Provider> Agent<P> {
             }
         }
 
-        self.provider
-            .stream_completion(
-                &self.config.model,
-                Some(&self.config.preamble), // Use preamble as system prompt
-                messages,
-                self.tools.definitions().await,
-                self.config.temperature,
-                self.config.max_tokens,
-                Some(extra),
-            )
-            .await
+        let request = crate::agent::provider::ChatRequest {
+            model: self.config.model.clone(),
+            system_prompt: Some(self.config.preamble.clone()),
+            messages,
+            tools: self.tools.definitions().await,
+            temperature: self.config.temperature,
+            max_tokens: self.config.max_tokens,
+            extra_params: Some(extra),
+        };
+
+        self.provider.stream_completion(request).await
     }
 
     /// Call a tool by name (Direct call helper)
@@ -559,11 +678,15 @@ pub struct AgentBuilder<P: Provider> {
     config: AgentConfig,
     injectors: Vec<Box<dyn ContextInjector>>,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    interaction_handler: Option<Arc<dyn InteractionHandler>>,
     notifier: Option<Arc<dyn Notifier>>,
+    cache: Option<Arc<dyn Cache>>,
     /// Security: Track if Python Sidecar is enabled (mutually exclusive with DynamicSkill)
     has_sidecar: bool,
     /// Security: Track if DynamicSkill is enabled (mutually exclusive with Sidecar)
     has_dynamic_skill: bool,
+    memory: Option<Arc<dyn Memory>>,
+    session_id: Option<String>,
 }
 
 impl<P: Provider> AgentBuilder<P> {
@@ -575,9 +698,13 @@ impl<P: Provider> AgentBuilder<P> {
             config: AgentConfig::default(),
             injectors: Vec::new(),
             approval_handler: None,
+            interaction_handler: None,
             notifier: None,
+            cache: None,
             has_sidecar: false,
             has_dynamic_skill: false,
+            memory: None,
+            session_id: None,
         }
     }
 
@@ -628,6 +755,12 @@ impl<P: Provider> AgentBuilder<P> {
         self
     }
 
+    /// Set interaction handler (for HITL)
+    pub fn interaction_handler(mut self, handler: impl InteractionHandler + 'static) -> Self {
+        self.interaction_handler = Some(Arc::new(handler));
+        self
+    }
+
     /// Set max history messages (sliding window)
     pub fn max_history_messages(mut self, count: usize) -> Self {
         self.config.max_history_messages = count;
@@ -655,6 +788,12 @@ impl<P: Provider> AgentBuilder<P> {
     /// Set a notifier
     pub fn notifier(mut self, notifier: impl Notifier + 'static) -> Self {
         self.notifier = Some(Arc::new(notifier));
+        self
+    }
+
+    /// Set session ID for persistence
+    pub fn session_id(mut self, id: impl Into<String>) -> Self {
+        self.session_id = Some(id.into());
         self
     }
 
@@ -690,15 +829,14 @@ impl<P: Provider> AgentBuilder<P> {
         self
     }
 
-    /// Add memory tools using the provided memory manager
-    pub fn with_memory(mut self, memory: Arc<MemoryManager>) -> Self {
-        // Use the unified memory (MemoryManager implements Memory) for tools
-        // to ensure Union Search is available.
+    /// Add memory tools using the provided memory implementation
+    pub fn with_memory(mut self, memory: Arc<dyn crate::agent::memory::Memory>) -> Self {
         self.tools.add(SearchHistoryTool::new(memory.clone()));
         self.tools.add(RememberThisTool::new(memory.clone()));
         self.tools.add(TieredSearchTool::new(memory.clone()));
-        self.tools.add(FetchDocumentTool::new(memory));
+        self.tools.add(FetchDocumentTool::new(memory.clone()));
         
+        self.memory = Some(memory);
         self
     }
 
@@ -843,19 +981,27 @@ impl<P: Provider> AgentBuilder<P> {
             context_manager.add_injector(injector);
         }
 
-        // Auto-inject personality if configured
         if let Some(persona) = &self.config.persona {
             context_manager.add_injector(Box::new(PersonalityManager::new(persona.clone())));
         }
 
+        // Auto-register AskUser tool if handler available
+        let mut tools = self.tools;
+        if let Some(handler) = &self.interaction_handler {
+            tools.add(AskUserTool { handler: Arc::clone(handler) });
+        }
+
         Ok(Agent {
             provider: Arc::new(self.provider),
-            tools: self.tools,
+            tools,
             config: self.config,
             context_manager,
             events: tx,
             approval_handler: self.approval_handler.unwrap_or_else(|| Arc::new(RejectAllApprovalHandler)),
+            cache: self.cache,
             notifier: self.notifier,
+            memory: self.memory,
+            session_id: self.session_id,
         })
     }
 

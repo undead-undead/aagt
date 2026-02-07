@@ -24,13 +24,7 @@ impl MockProvider {
 impl Provider for MockProvider {
     async fn stream_completion(
         &self,
-        _model: &str,
-        _system_prompt: Option<&str>,
-        _messages: Vec<Message>,
-        _tools: Vec<ToolDefinition>,
-        _temperature: Option<f64>,
-        _max_tokens: Option<u64>,
-        _extra_params: Option<serde_json::Value>,
+        _request: aagt_core::agent::provider::ChatRequest,
     ) -> Result<StreamingResponse> {
         // Split response into chunks for realistic streaming simulation
         let chunks: Vec<String> = self
@@ -63,15 +57,11 @@ mod tests {
     async fn test_mock_provider() {
         let provider = MockProvider::new("Hello, world!");
         let stream = provider
-            .stream_completion(
-                "test",
-                None,
-                vec![Message::user("Hi")],
-                vec![],
-                None,
-                None,
-                None,
-            )
+            .stream_completion(aagt_core::agent::provider::ChatRequest {
+                model: "test".to_string(),
+                messages: vec![Message::user("Hi")],
+                ..Default::default()
+            })
             .await
             .expect("should succeed");
 

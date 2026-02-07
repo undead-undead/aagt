@@ -11,6 +11,7 @@ exclude = ["models", "*.db", "*.onnx", "*.safetensors"]
 # Core async runtime
 tokio = { version = "1.35", features = ["full"] }
 async-trait = "0.1"
+aagt-core = { path = "../aagt-core" }
 
 # SQLite with FTS5
 rusqlite = { version = "0.31", features = ["bundled", "hooks"] }

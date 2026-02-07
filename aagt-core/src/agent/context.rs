@@ -31,10 +31,10 @@ impl Default for ContextConfig {
 }
 
 /// Trait for injecting dynamic context
+#[async_trait::async_trait]
 pub trait ContextInjector: Send + Sync {
     /// Generate messages to inject into the context
-    /// Generate messages to inject into the context
-    fn inject(&self) -> Result<Vec<Message>>;
+    async fn inject(&self) -> Result<Vec<Message>>;
 }
 
 /// Manages the context window for an agent
@@ -71,7 +71,7 @@ impl ContextManager {
     /// 2. Dynamic Context Injection (RAG, etc.) (Protected)
     /// 3. Token budgeting using tiktoken (Soft Pruning)
     /// 4. Message windowing (based on max_history_messages)
-    pub fn build_context(&self, history: &[Message]) -> Result<Vec<Message>> {
+    pub async fn build_context(&self, history: &[Message]) -> Result<Vec<Message>> {
         // 1. Initialize Tokenizer
         let bpe = tiktoken_rs::cl100k_base().map_err(|e| {
             crate::error::Error::Internal(format!("Failed to load tokenizer: {}", e))
@@ -87,7 +87,7 @@ impl ContextManager {
         // --- 2. Run Injectors (Protected - e.g. RAG) ---
         // In a more advanced version, we might want to budget RAG too, but for now we treat it as critical context.
         for injector in &self.injectors {
-            match injector.inject() {
+            match injector.inject().await {
                 Ok(msgs) => final_context_start.extend(msgs),
                 Err(e) => tracing::warn!("Context injector failed: {}", e),
             }
@@ -230,7 +230,7 @@ mod tests {
         let config = ContextConfig::default();
         let mgr = ContextManager::new(config);
         let history = vec![Message::user("test")];
-        let ctx = mgr.build_context(&history).unwrap();
+        let ctx = mgr.build_context(&history).await.unwrap();
         assert_eq!(ctx.len(), 1);
     }
 }

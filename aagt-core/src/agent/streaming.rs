@@ -1,5 +1,6 @@
 //! Streaming response types
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -8,6 +9,17 @@ use futures::Stream;
 
 use crate::error::Error;
 use crate::agent::message::ToolCall;
+
+/// Token usage information
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Usage {
+    /// Number of tokens in the prompt
+    pub prompt_tokens: u32,
+    /// Number of tokens in the completion
+    pub completion_tokens: u32,
+    /// Total number of tokens
+    pub total_tokens: u32,
+}
 
 /// A chunk from a streaming response
 #[derive(Debug, Clone)]
@@ -30,6 +42,9 @@ pub enum StreamingChoice {
 
     /// Thinking/reasoning chunk (e.g., Gemini's thoughts)
     Thought(String),
+
+    /// Usage information (emitted at the end)
+    Usage(Usage),
 
     /// Stream finished
     Done,
@@ -160,6 +175,12 @@ impl MockStreamBuilder {
     /// Add an error
     pub fn error(mut self, error: Error) -> Self {
         self.chunks.push(Err(error));
+        self
+    }
+
+    /// Add usage info
+    pub fn usage(mut self, usage: Usage) -> Self {
+        self.chunks.push(Ok(StreamingChoice::Usage(usage)));
         self
     }
 

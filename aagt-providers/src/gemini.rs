@@ -216,19 +216,23 @@ impl Gemini {
 impl Provider for Gemini {
     async fn stream_completion(
         &self,
-        model: &str,
-        system_prompt: Option<&str>,
-        messages: Vec<Message>,
-        tools: Vec<ToolDefinition>,
-        temperature: Option<f64>,
-        max_tokens: Option<u64>,
-        _extra_params: Option<serde_json::Value>,
+        request: aagt_core::agent::provider::ChatRequest,
     ) -> Result<StreamingResponse> {
-        let request = GeminiRequest {
+        let aagt_core::agent::provider::ChatRequest {
+            model,
+            system_prompt,
+            messages,
+            tools,
+            temperature,
+            max_tokens,
+            extra_params: _,
+        } = request;
+
+        let gemini_request = GeminiRequest {
             contents: Self::convert_messages(messages),
             system_instruction: system_prompt.map(|s| GeminiContent {
                 role: "user".to_string(),
-                parts: vec![Part::Text { text: s.to_string() }],
+                parts: vec![Part::Text { text: s }],
             }),
             generation_config: Some(GenerationConfig {
                 temperature,
@@ -246,7 +250,7 @@ impl Provider for Gemini {
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .json(&request)
+            .json(&gemini_request)
             .send()
             .await?;
 

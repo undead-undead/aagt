@@ -131,8 +131,9 @@ impl PersonalityManager {
     }
 }
 
+#[async_trait::async_trait]
 impl ContextInjector for PersonalityManager {
-    fn inject(&self) -> crate::error::Result<Vec<Message>> {
+    async fn inject(&self) -> crate::error::Result<Vec<Message>> {
         // Personas are injected as a hidden system-style guidance piece
         Ok(vec![Message::system(self.persona.to_prompt())])
     }

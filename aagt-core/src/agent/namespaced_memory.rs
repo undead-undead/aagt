@@ -196,10 +196,8 @@ impl NamespacedMemory {
 
     /// Delete a key from a namespace
     pub async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
-        let full_key = format!("{}::{}", namespace, key);
-        // Note: MemoryManager doesn't have a delete method in the current implementation
-        // This would need to be added to the underlying implementation
-        // For now, we can store an expired entry
+        // For now, we "delete" by storing an expired entry.
+        // The Memory trait should eventually include a delete method.
         self.store(namespace, key, "", Some(Duration::from_secs(0)), None).await
     }
 

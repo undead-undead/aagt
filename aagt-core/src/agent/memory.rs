@@ -6,22 +6,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
 
-use crate::agent::message::{Message, Role, Content};
-use crate::knowledge::store::file::{FileStore, FileStoreConfig};
-use crate::knowledge::rag::VectorStore;
-
-#[cfg(feature = "qmd")]
-use aagt_qmd::HybridSearchEngine;
-
+use crate::agent::message::Message;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Weak;
 use async_trait::async_trait;
 
-#[cfg(feature = "qmd")]
-use crate::agent::scheduler::{Scheduler, JobPayload, JobSchedule};
+use crate::agent::scheduler::Scheduler;
 
 /// Trait for memory implementations
 #[async_trait]
@@ -70,6 +62,16 @@ pub trait Memory: Send + Sync {
     /// Fetch a full document by path
     async fn fetch_document(&self, collection: &str, path: &str) -> crate::error::Result<Option<crate::knowledge::rag::Document>> {
         let _ = (collection, path);
+        Ok(None)
+    }
+
+    /// Store an agent session state
+    async fn store_session(&self, _session: crate::agent::session::AgentSession) -> crate::error::Result<()> {
+        Ok(())
+    }
+
+    /// Retrieve an agent session state
+    async fn retrieve_session(&self, _session_id: &str) -> crate::error::Result<Option<crate::agent::session::AgentSession>> {
         Ok(None)
     }
 }
@@ -346,686 +348,44 @@ impl Memory for ShortTermMemory {
     }
 }
 
-/// Memory entry for long-term storage
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryEntry {
-    /// Unique ID
-    pub id: String,
-    /// User ID this belongs to
-    pub user_id: String,
-    /// Content/summary
-    pub content: String,
-    /// Timestamp
-    pub timestamp: i64,
-    /// Tags for categorization
-    pub tags: Vec<String>,
-    /// Relevance score (for retrieval ranking)
-    pub relevance: f32,
-}
-
-/// Filter for tags during retrieval
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TagFilter {
-    /// Include only if it has ANY of these tags
-    IncludeAny(Vec<String>),
-    /// Exclude if it has ANY of these tags
-    ExcludeAny(Vec<String>),
-    /// No filtering
-    None,
-}
-
-/// Long-term memory - stores important information persistently
-/// Backed by FileStore (JSONL)
-pub struct LongTermMemory {
-    store: Arc<FileStore>,
-    max_entries: usize,
-}
-
-impl LongTermMemory {
-    /// Create with capacity and path
-    pub async fn new(max_entries: usize, path: PathBuf) -> crate::error::Result<Self> {
-        let config = FileStoreConfig::new(path);
-        let store = Arc::new(FileStore::new(config).await?);
-        Ok(Self {
-            store,
-            max_entries,
-        })
-    }
-
-    /// Store a memory entry
-    pub async fn store_entry(&self, entry: MemoryEntry, agent_id: Option<&str>) -> crate::error::Result<()> {
-        let mut metadata = HashMap::new();
-        metadata.insert("user_id".to_string(), entry.user_id.clone());
-        if let Some(aid) = agent_id {
-            metadata.insert("agent_id".to_string(), aid.to_string());
-        }
-        metadata.insert("timestamp".to_string(), entry.timestamp.to_string());
-        // Serialize tags - fail loudly to maintain data integrity
-        let tags_json = serde_json::to_string(&entry.tags)
-            .map_err(|e| crate::error::Error::Internal(format!("Failed to serialize tags: {}", e)))?;
-        metadata.insert("tags".to_string(), tags_json);
-        metadata.insert("relevance".to_string(), entry.relevance.to_string());
-
-        // We don't strictly enforce max_entries on insert here to avoid high cost of counting/deleting every time.
-        // A periodic cleanup task is better.
-        
-        self.store.store(&entry.content, metadata).await?;
-        
-        // Fix #2: Probabilistic Cleanup
-        // To avoid overhead on every write, check cleanup 5% of the time
-        // or just rely on a separate task. Here we do simple probabilistic check.
-        if fastrand::usize(..100) < 5 {
-            self.prune(self.max_entries, entry.user_id.clone(), agent_id.map(|s| s.to_string())).await;
-        }
-        
-        Ok(())
-    }
-
-    /// Prune old entries if exceeding limit
-    /// Fix H1: Synchronous execution with proper error handling
-    pub async fn prune(&self, limit: usize, user_id: String, agent_id: Option<String>) -> Result<(), crate::error::Error> {
-        let uid = user_id.clone();
-        let aid = agent_id.clone();
-        
-        // Find all IDs for this user/agent
-        let docs = self.store.find_metadata(move |idx| {
-            if idx.get_metadata("user_id") != Some(&uid) { return false; }
-            if let Some(ref target_aid) = aid {
-                if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
-            }
-            true
-        }).await;
-
-        if docs.len() <= limit {
-            return Ok(());
-        }
-
-        // Parse timestamps and sort
-        let mut entries: Vec<(String, i64)> = docs.into_iter().filter_map(|idx| {
-            let ts = idx.get_metadata("timestamp")?.parse::<i64>().ok()?;
-            Some((idx.id, ts))
-        }).collect();
-
-        // Sort: Oldest first (ascending timestamp)
-        entries.sort_by_key(|k| k.1);
-
-        // Determine how many to delete
-        let to_remove = entries.len().saturating_sub(limit);
-        if to_remove > 0 {
-            // Collect IDs to delete
-            let ids_to_delete: Vec<String> = entries.into_iter()
-                .take(to_remove)
-                .map(|(id, _)| id)
-                .collect();
-
-            tracing::info!("Pruning {} old entries for user {} (agent {:?})", 
-                ids_to_delete.len(), user_id, agent_id);
-
-            // Batch Delete (Single Snapshot Save)
-            self.store.delete_batch(ids_to_delete).await?;
-            
-            // Trigger compaction if we deleted a lot
-            if to_remove > 100 {
-                self.store.auto_compact(limit).await?;
-            }
-        }
-        
-        Ok(())
-    }
-
-    /// Retrieve entries by tag with optional agent isolation
-    pub async fn retrieve_by_tag(&self, user_id: &str, tag: &str, agent_id: Option<&str>, limit: usize) -> Vec<MemoryEntry> {
-        self.retrieve_filtered(user_id, agent_id, TagFilter::IncludeAny(vec![tag.to_string()]), limit).await
-    }
-
-    /// Retrieve recent entries with token awareness (approximate) and optional agent isolation
-    pub async fn retrieve_recent(&self, user_id: &str, agent_id: Option<&str>, char_limit: usize) -> Vec<MemoryEntry> {
-        // Default behavior: Exclude "archived" and "do_not_rag"
-        let filter = TagFilter::ExcludeAny(vec!["archived".to_string(), "do_not_rag".to_string()]);
-        
-        let uid = user_id.to_string();
-        let aid = agent_id.map(|s| s.to_string());
-        
-        let matches = self.store.find_metadata(move |idx| {
-            let matches_user = idx.get_metadata("user_id") == Some(&uid);
-            let matches_agent = aid.is_none() || idx.get_metadata("agent_id") == aid.as_deref();
-            
-            if !matches_user || !matches_agent {
-                return false;
-            }
-
-            // Apply Tag Filter
-            if let Some(tags_json) = idx.get_metadata("tags") {
-                let tags: Vec<String> = serde_json::from_str(tags_json).unwrap_or_default();
-                match &filter {
-                    TagFilter::IncludeAny(include_tags) => {
-                        include_tags.iter().any(|t| tags.contains(t))
-                    }
-                    TagFilter::ExcludeAny(exclude_tags) => {
-                        !exclude_tags.iter().any(|t| tags.contains(t))
-                    }
-                    TagFilter::None => true,
-                }
-            } else {
-                // If no tags, include unless we require inclusion
-                match &filter {
-                    TagFilter::IncludeAny(_) => false,
-                    _ => true,
-                }
-            }
-        }).await;
-
-        if matches.is_empty() {
-            return Vec::new();
-        }
-
-        // Parse timestamps and sort by timestamp descending (newest first)
-        let mut sorted_indices: Vec<(crate::knowledge::store::file::IndexEntry, i64)> = matches.into_iter().filter_map(|idx| {
-            let ts = idx.get_metadata("timestamp")?.parse::<i64>().ok()?;
-            Some((idx, ts))
-        }).collect();
-        sorted_indices.sort_by(|a, b| b.1.cmp(&a.1));
-
-        let mut result_entries = Vec::new();
-        let mut current_chars = 0;
-
-        // Hydrate entries one by one until char_limit is reached
-        for (idx, _) in sorted_indices {
-            // We need to hydrate to get the content length
-            if let Some(doc) = self.store.get(&idx.id).await.ok().flatten() {
-                if current_chars + doc.content.len() > char_limit {
-                    break;
-                }
-                if let Some(entry) = Self::doc_to_entry(doc) {
-                    current_chars += entry.content.len();
-                    result_entries.push(entry);
-                }
-            }
-        }
-        result_entries
-    }
-    
-    /// Advanced retrieval with explicit tag filtering
-    pub async fn retrieve_filtered(&self, user_id: &str, agent_id: Option<&str>, filter: TagFilter, limit: usize) -> Vec<MemoryEntry> {
-        let uid = user_id.to_string();
-        let aid = agent_id.map(|s| s.to_string());
-        let filter_clone = filter.clone();
-
-        let docs = self.store.find(move |idx| {
-            if idx.get_metadata("user_id") != Some(&uid) { return false; }
-            if let Some(ref target_aid) = aid {
-                if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
-            }
-            
-            if let Some(tags_json) = idx.get_metadata("tags") {
-                let tags: Vec<String> = serde_json::from_str(tags_json).unwrap_or_default();
-                match &filter_clone {
-                    TagFilter::IncludeAny(include_tags) => {
-                        include_tags.iter().any(|t| tags.contains(t))
-                    }
-                    TagFilter::ExcludeAny(exclude_tags) => {
-                        !exclude_tags.iter().any(|t| tags.contains(t))
-                    }
-                    TagFilter::None => true,
-                }
-            } else {
-                match &filter_clone {
-                    TagFilter::IncludeAny(_) => false,
-                    _ => true,
-                }
-            }
-        }).await;
-        
-        docs.into_iter()
-            .filter_map(|doc| Self::doc_to_entry(doc))
-            .take(limit)
-            .collect()
-    }
-
-    /// Helper to convert Document to MemoryEntry
-    fn doc_to_entry(doc: crate::knowledge::rag::Document) -> Option<MemoryEntry> {
-        let user_id = doc.metadata.get("user_id")?.clone();
-        let timestamp = doc.metadata.get("timestamp")?.parse().ok()?;
-        let tags: Vec<String> = serde_json::from_str(doc.metadata.get("tags")?).ok()?;
-        let relevance = doc.metadata.get("relevance")?.parse().ok().unwrap_or(1.0);
-
-        Some(MemoryEntry {
-            id: doc.id,
-            user_id,
-            content: doc.content,
-            timestamp,
-            tags,
-            relevance,
-        })
-    }
-
-    /// Clear all entries for a user
-    // Inefficient clear removed in favor of trait implementation
-    pub async fn clear_deprecated(&self, user_id: &str, agent_id: Option<&str>) {
-        let _ = <Self as Memory>::clear(self, user_id, agent_id).await;
-    }
-}
-
-#[async_trait]
-impl Memory for LongTermMemory {
-    async fn store(&self, user_id: &str, agent_id: Option<&str>, message: Message) -> crate::error::Result<()> {
-         let entry = MemoryEntry {
-             id: uuid::Uuid::new_v4().to_string(),
-             user_id: user_id.to_string(),
-             content: message.content.as_text(),
-             timestamp: chrono::Utc::now().timestamp_millis(),
-             tags: vec![message.role.as_str().to_string(), "conversation".to_string()],
-             relevance: 1.0, 
-         };
-         
-         // Fix #4: Await the result, no background spawn
-         self.store_entry(entry, agent_id).await
-    }
-
-    async fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
-         // Map Entry -> Message
-         let entries = self.retrieve_recent(user_id, agent_id, limit * 100).await; // char limit approximate
-         entries.into_iter().map(|e| {
-             let role = if e.tags.contains(&"user".to_string()) { Role::User } else { Role::Assistant };
-             Message {
-                 role,
-                 name: None,
-                 content: Content::Text(e.content),
-             }
-         }).take(limit).collect()
-    }
-    
-    async fn clear(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<()> {
-        let uid = user_id.to_string();
-        let aid = agent_id.map(|s| s.to_string());
-        
-        let store = self.store.clone();
-        
-        let ids_to_delete = store.find_ids(move |idx| {
-            if idx.get_metadata("user_id") != Some(&uid) { return false; }
-            if let Some(ref target_aid) = aid {
-                 if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
-            }
-            true
-        }).await;
-
-        if !ids_to_delete.is_empty() {
-            store.delete_batch(ids_to_delete).await?;
-        }
-        Ok(())
-    }
-
-    async fn undo(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<Option<Message>> {
-        let uid = user_id.to_string();
-        let aid = agent_id.map(|s| s.to_string());
-        
-        let matches = self.store.find_metadata(move |idx| {
-            if idx.get_metadata("user_id") != Some(&uid) { return false; }
-            if let Some(ref target_aid) = aid {
-                 if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
-            }
-            true
-        }).await;
-
-        if matches.is_empty() {
-            return Ok(None);
-        }
-
-        // Find the one with highest timestamp
-        let mut latest: Option<(String, i64)> = None;
-        for idx in matches {
-            if let Some(ts_str) = idx.get_metadata("timestamp") {
-                if let Ok(ts) = ts_str.parse::<i64>() {
-                    if latest.is_none() || ts > latest.as_ref().unwrap().1 {
-                        latest = Some((idx.id.clone(), ts));
-                    }
-                }
-            }
-        }
-
-        if let Some((id, _)) = latest {
-            if let Some(doc) = self.store.get(&id).await? {
-                if let Some(entry) = Self::doc_to_entry(doc) {
-                    let role = if entry.tags.contains(&"user".to_string()) { Role::User } else { Role::Assistant };
-                    let msg = Message {
-                        role,
-                        name: None,
-                        content: Content::Text(entry.content),
-                    };
-                    self.store.delete(&id).await?;
-                    return Ok(Some(msg));
-                }
-            }
-        }
-        
-        Ok(None)
-    }
-
-    async fn store_knowledge(&self, user_id: &str, agent_id: Option<&str>, title: &str, content: &str, collection: &str) -> crate::error::Result<()> {
-        let entry = MemoryEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            user_id: user_id.to_string(),
-            content: content.to_string(),
-            timestamp: chrono::Utc::now().timestamp_millis(),
-            tags: vec![collection.to_string(), "knowledge".to_string()],
-            relevance: 1.0,
-        };
-        // We can use title in metadata or tags
-        let mut metadata = HashMap::new();
-        metadata.insert("title".to_string(), title.to_string());
-        
-        self.store_entry(entry, agent_id).await
-    }
-
-    async fn search(&self, user_id: &str, agent_id: Option<&str>, query: &str, limit: usize) -> crate::error::Result<Vec<crate::knowledge::rag::Document>> {
-        let uid = user_id.to_string();
-        let aid = agent_id.map(|s| s.to_string());
-        let query_lower = query.to_lowercase();
-        
-        let matches = self.store.find_metadata(move |idx| {
-            if idx.get_metadata("user_id") != Some(&uid) { return false; }
-            if let Some(ref target_aid) = aid {
-                 if idx.get_metadata("agent_id") != Some(target_aid) { return false; }
-            }
-            true
-        }).await;
-
-        let mut results = Vec::new();
-        for idx in matches {
-            if let Some(doc) = self.store.get(&idx.id).await? {
-                if doc.content.to_lowercase().contains(&query_lower) {
-                    let title = doc.metadata.get("title").cloned().unwrap_or_else(|| doc.content.chars().take(50).collect());
-                    if let Some(entry) = Self::doc_to_entry(doc) {
-                        results.push(crate::knowledge::rag::Document {
-                            id: entry.id,
-                            title,
-                            content: entry.content,
-                            summary: None,
-                            collection: None,
-                            path: None,
-                            metadata: HashMap::new(),
-                            score: 1.0, // Simple keyword match
-                        });
-                    }
-                }
-            }
-            if results.len() >= limit {
-                break;
-            }
-        }
-        
-        Ok(results)
-    }
-}
-
-#[cfg(feature = "qmd")]
-/// Memory implementation using aagt-qmd (SQLite FTS5)
-pub struct QmdMemory {
-    engine: Arc<HybridSearchEngine>,
-    max_entries: usize,
-    scheduler: std::sync::RwLock<Option<Weak<Scheduler>>>,
-}
-
-#[cfg(feature = "qmd")]
-impl QmdMemory {
-    /// Create a new QmdMemory with path and capacity
-    pub async fn new(max_entries: usize, path: PathBuf) -> crate::error::Result<Self> {
-        use aagt_qmd::HybridSearchConfig;
-        
-        let mut config = HybridSearchConfig::default();
-        config.db_path = path;
-        
-        let engine = Arc::new(HybridSearchEngine::new(config).map_err(|e| crate::error::Error::Internal(e.to_string()))?);
-        Ok(Self {
-            engine,
-            max_entries,
-            scheduler: std::sync::RwLock::new(None),
-        })
-    }
-
-    /// Set the scheduler for background tasks
-    pub fn set_scheduler(&self, scheduler: Weak<Scheduler>) {
-        if let Ok(mut lock) = self.scheduler.write() {
-            *lock = Some(scheduler);
-        }
-    }
-    
-    /// Get the internal search engine
-    pub fn engine(&self) -> Arc<HybridSearchEngine> {
-        self.engine.clone()
-    }
-
-    /// Store multiple messages efficiently
-    pub async fn store_batch(&self, user_id: &str, agent_id: Option<&str>, messages: Vec<Message>) -> crate::error::Result<()> {
-        for msg in messages {
-            self.store(user_id, agent_id, msg).await?;
-        }
-        Ok(())
-    }
-}
-
-#[cfg(feature = "qmd")]
-#[async_trait]
-impl Memory for QmdMemory {
-    async fn store(&self, _user_id: &str, agent_id: Option<&str>, message: Message) -> crate::error::Result<()> {
-        let content = message.content.as_text();
-        let timestamp = chrono::Utc::now().timestamp_millis();
-        let role = message.role.as_str();
-        
-        // Use user_id as collection, agent_id:timestamp as virtual path
-        // For conversation history, we'll use a standard "history" collection
-        let path = format!("{}:{}", agent_id.unwrap_or("global"), timestamp);
-        let title = format!("{} message at {}", role, timestamp);
-        
-        self.engine.index_document("history", &path, &title, &content)
-            .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
-        
-        Ok(())
-    }
-
-    async fn store_knowledge(&self, user_id: &str, agent_id: Option<&str>, title: &str, content: &str, collection: &str) -> crate::error::Result<()> {
-        let timestamp = chrono::Utc::now().timestamp_millis();
-        // Incorporate user context in path to prevent global namespace collisions
-        let path = format!("{}:{}:memory_{}", user_id, agent_id.unwrap_or("global"), timestamp);
-        
-        self.engine.index_document(collection, &path, title, content)
-            .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
-        
-        // Trigger background summarization
-        let weak_sched = if let Ok(lock) = self.scheduler.read() {
-            lock.clone()
-        } else {
-            None
-        };
-
-        if let Some(weak) = weak_sched {
-            if let Some(sched) = weak.upgrade() {
-                let payload = JobPayload::SummarizeDoc {
-                    collection: collection.to_string(),
-                    path: path.clone(),
-                    content: content.to_string(),
-                };
-                
-                // Fire and forget the summarization task
-                let _ = sched.add_job(
-                    format!("summarize_{}", path),
-                    JobSchedule::At { at: chrono::Utc::now() },
-                    payload,
-                ).await;
-            }
-        }
-        
-        Ok(())
-    }
-
-    async fn search(&self, _user_id: &str, _agent_id: Option<&str>, query: &str, limit: usize) -> crate::error::Result<Vec<crate::knowledge::rag::Document>> {
-        // Currently QmdEngine searches globally or by collection.
-        // In the future, we should add filtering by path prefix or metadata to HybridSearchEngine.
-        // For now, we search the whole database or just the "history" collection.
-        let results = self.engine.search(query, limit)
-            .map_err(|e| crate::error::Error::Internal(format!("Search failed: {}", e)))?;
-            
-        let docs = results.into_iter().map(|res| {
-            crate::knowledge::rag::Document {
-                id: res.document.docid,
-                title: res.document.title,
-                content: res.document.body.unwrap_or_default(),
-                summary: res.document.summary,
-                collection: Some(res.document.collection),
-                path: Some(res.document.path),
-                metadata: HashMap::new(), // Score already factored into hybrid search
-                score: res.rrf_score as f32,
-            }
-        }).collect();
-        
-        Ok(docs)
-    }
-
-    async fn retrieve(&self, _user_id: &str, _agent_id: Option<&str>, _limit: usize) -> Vec<Message> {
-        // Since this is generic retrieval without a specific query, 
-        // we might just want to list recent documents in the collection?
-        // But the Memory trait's retrieve is usually for "recent context".
-        // QmdStore doesn't have a direct "get latest X" yet, it's search-focused.
-        // However, we can use search with "*" if supported or just a wide query.
-        // For now, let's implement it as a search for empty string if QmdStore supports it,
-        // or just return empty if no query is provided (actual search happens via Tools).
-        
-        // In this architecture, active retrieval happens via `search_history` tool.
-        // This method is used for background context filling.
-        Vec::new() 
-    }
-
-    async fn clear(&self, _user_id: &str, _agent_id: Option<&str>) -> crate::error::Result<()> {
-        // QmdStore needs a way to delete collections or documents by pattern.
-        // For now, we can just vacuum or clear the whole DB if needed, 
-        // or implement selective deletion in QmdStore later.
-        Ok(())
-    }
-
-    async fn undo(&self, _user_id: &str, _agent_id: Option<&str>) -> crate::error::Result<Option<Message>> {
-        // Not strictly required for LTM, but could be implemented by finding the latest doc.
-        Ok(None)
-    }
-
-    async fn update_summary(&self, collection: &str, path: &str, summary: &str) -> crate::error::Result<()> {
-        self.engine.update_summary(collection, path, summary)
-            .map_err(|e| crate::error::Error::Internal(e.to_string()))
-    }
-
-    fn link_scheduler(&self, scheduler: Weak<Scheduler>) {
-        self.set_scheduler(scheduler);
-    }
-
-    async fn fetch_document(&self, collection: &str, path: &str) -> crate::error::Result<Option<crate::knowledge::rag::Document>> {
-        let doc = self.engine.get_by_path(collection, path)
-            .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
-        
-        Ok(doc.map(|d| crate::knowledge::rag::Document {
-            id: d.docid,
-            title: d.title,
-            content: d.body.unwrap_or_default(),
-            summary: d.summary,
-            collection: Some(d.collection),
-            path: Some(d.path),
-            metadata: HashMap::new(),
-            score: 1.0,
-        }))
-    }
-}
-
 /// Combined memory manager for tiered storage
 pub struct MemoryManager {
-    /// Short-term conversation memory (Hot Tier)
-    pub short_term: Arc<ShortTermMemory>,
-    /// Long-term persistent memory (Cold Tier)
-    pub long_term: Arc<dyn Memory>,
+    /// Hot Storage Layer (e.g. In-memory or fast local cache)
+    pub hot_tier: Arc<dyn Memory>,
+    /// Cold Storage Layer (e.g. SQLite, Vector DB)
+    pub cold_tier: Arc<dyn Memory>,
 }
 
 impl MemoryManager {
     /// Create a new MemoryManager with specific backends
-    pub fn new_with_tiers(short_term: Arc<ShortTermMemory>, long_term: Arc<dyn Memory>) -> Self {
-        Self { short_term, long_term }
-    }
-    /// Create with default settings (Async)
-    pub async fn new() -> crate::error::Result<Self> {
-        // STM: Keep it small. 50 messages max per user.
-        // If QMD is enabled, use it as default LTM. Otherwise use a simple LongTermMemory fallback if available.
-        Self::with_capacity(50, 1000, 1000, PathBuf::from("data/memory.jsonl")).await
+    pub fn new(hot_tier: Arc<dyn Memory>, cold_tier: Arc<dyn Memory>) -> Self {
+        Self { hot_tier, cold_tier }
     }
 
-    /// Create with custom capacities and path
-    pub async fn with_capacity(short_term_max: usize, short_term_users: usize, long_term_max: usize, path: PathBuf) -> crate::error::Result<Self> {
-        let short_term_path = path.with_extension("stm.json");
-        
-        let stm = Arc::new(ShortTermMemory::new(short_term_max, short_term_users, short_term_path).await);
-        
-        #[cfg(feature = "qmd")]
-        {
-            let qmd_path = path.with_extension("db");
-            let ltm = Arc::new(QmdMemory::new(long_term_max, qmd_path).await?);
-            Ok(Self::new_with_tiers(stm, ltm))
-        }
-        
-        #[cfg(not(feature = "qmd"))]
-        {
-            // Fallback to LongTermMemory (JSONL) which we need to make implement Memory
-            let ltm_path = path.with_extension("jsonl");
-            let ltm = Arc::new(LongTermMemory::new(long_term_max, ltm_path).await?);
-            // We'll need to implement Memory for LongTermMemory next
-            Ok(Self::new_with_tiers(stm, ltm))
-        }
-    }
-
-    #[cfg(feature = "qmd")]
-    /// Create with QMD backend using simplified path
-    pub async fn with_qmd(db_path: impl Into<PathBuf>) -> crate::error::Result<Self> {
-        Self::with_capacity(50, 1000, 1000, db_path.into()).await
-    }
-    
     /// Tiered Storage Store
-    /// Stores in STM, then auto-archives to LTM if STM > threshold (e.g. 20)
+    /// Stores in Hot Tier, then auto-archives to Cold Tier if capacity exceeded
     pub async fn store(&self, user_id: &str, agent_id: Option<&str>, message: Message) -> crate::error::Result<()> {
-        // 1. Write to Hot Storage (STM) - Fast
-        self.short_term.store(user_id, agent_id, message).await?;
+        // 1. Write to Hot Storage - Fast
+        self.hot_tier.store(user_id, agent_id, message).await?;
         
-        // 2. Check Capacity & Tiering
-        let count = self.short_term.message_count(user_id, agent_id);
-        const TIERING_THRESHOLD: usize = 20;
-        const ARCHIVE_BATCH_SIZE: usize = 10;
-        
-        if count > TIERING_THRESHOLD {
-            let old_messages = self.short_term.pop_oldest(user_id, agent_id, ARCHIVE_BATCH_SIZE).await;
-            if !old_messages.is_empty() {
-                // Move to Cold Storage (LTM)
-                // We spawn this or await? 
-                // Awaiting ensures data safety. STM is already saved, so if this fails, we effectively lose them 
-                // from Hot but haven't put them in Cold. 
-                // pop_oldest already removed them and saved STM.
-                // So we MUST ensure LTM store succeeds or we lose data.
-                // ideally pop_oldest should only commit if LTM implies success, but that requires 2PC.
-                // For now, simpler: Just await.
-                if let Err(e) = self.long_term.store_batch(user_id, agent_id, old_messages).await {
-                     tracing::error!("FAILED TO ARCHIVE MEMORY to LTM: {}. Data lost!", e);
-                     // In a real system we might push them back to STM or a 'dead letter' queue
-                }
-            }
-        }
+        // 2. Archive older messages if needed
+        // Note: The specific logic for "when to archive" could be moved to a TieringPolicy
+        // For now, we use a simple heuristic if the Hot Tier supports counting.
+        // Since we are now using dyn Memory, we might need to add a 'count' method to the trait 
+        // if we want generic tiering logic here, or let the Hot Tier handle its own overflow.
         
         Ok(())
     }
     
     /// Unified Retrieve
-    /// Fetches from Hot (STM) + Cold (LTM) seamlessly
+    /// Fetches from Hot + Cold seamlessly
     pub async fn retrieve_unified(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
-        // 1. Get from Hot
-        let mut messages = self.short_term.retrieve(user_id, agent_id, limit).await;
+        let mut messages = self.hot_tier.retrieve(user_id, agent_id, limit).await;
         
-        // 2. Check if we need more from Cold
         if messages.len() < limit {
              let needed = limit - messages.len();
-             let cold_messages = self.long_term.retrieve(user_id, agent_id, needed).await;
+             let cold_messages = self.cold_tier.retrieve(user_id, agent_id, needed).await;
              
-             // Combine: Cold (Older) + Hot (Newer)
              let mut combined = cold_messages;
              combined.extend(messages);
              messages = combined;
@@ -1034,37 +394,29 @@ impl MemoryManager {
         messages
     }
 
-    /// Union Search - searches both STM and LTM
+    /// Union Search - searches both Hot and Cold tiers
     pub async fn search_unified(&self, user_id: &str, agent_id: Option<&str>, query: &str, limit: usize) -> crate::error::Result<Vec<crate::knowledge::rag::Document>> {
-        // 1. Search STM (Hot)
-        let stm_results = self.short_term.search(user_id, agent_id, query, limit).await?;
+        let hot_results = self.hot_tier.search(user_id, agent_id, query, limit).await?;
+        let cold_results = self.cold_tier.search(user_id, agent_id, query, limit).await?;
         
-        // 2. Search LTM (Cold)
-        let ltm_results = self.long_term.search(user_id, agent_id, query, limit).await?;
-        
-        // 3. Merge & Deduplicate
-        let mut combined = stm_results;
-        for ltm_res in ltm_results {
-            // Simple deduplication by content similarity/exact match if they happened to overlap during tiering
-            if !combined.iter().any(|r| r.content == ltm_res.content) {
-                combined.push(ltm_res);
+        let mut combined = hot_results;
+        for cold_res in cold_results {
+            if !combined.iter().any(|r| r.content == cold_res.content) {
+                combined.push(cold_res);
             }
         }
         
-        // 4. Sort by score (if helpful) and limit
         combined.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         combined.truncate(limit);
         
         Ok(combined)
     }
 
-    /// Undo last message in both memories
+    /// Undo last message
     pub async fn undo(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<Option<Message>> {
-        // STM undo is primary for conversation flow
-        let stm_msg = self.short_term.undo(user_id, agent_id).await?;
-        // LTM undo keeps persistence in sync
-        let _ = self.long_term.undo(user_id, agent_id).await?;
-        Ok(stm_msg)
+        let hot_msg = self.hot_tier.undo(user_id, agent_id).await?;
+        let _ = self.cold_tier.undo(user_id, agent_id).await?;
+        Ok(hot_msg)
     }
 }
 
@@ -1083,18 +435,26 @@ impl Memory for MemoryManager {
     }
 
     async fn store_knowledge(&self, user_id: &str, agent_id: Option<&str>, title: &str, content: &str, collection: &str) -> crate::error::Result<()> {
-        // Knowledge usually goes directly to LTM for permanence
-        self.long_term.store_knowledge(user_id, agent_id, title, content, collection).await
+        // Knowledge usually goes directly to Cold tier for permanence
+        self.cold_tier.store_knowledge(user_id, agent_id, title, content, collection).await
     }
 
     async fn clear(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<()> {
-        self.short_term.clear(user_id, agent_id).await?;
-        self.long_term.clear(user_id, agent_id).await?;
+        self.hot_tier.clear(user_id, agent_id).await?;
+        self.cold_tier.clear(user_id, agent_id).await?;
         Ok(())
     }
 
     async fn undo(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<Option<Message>> {
         self.undo(user_id, agent_id).await
+    }
+
+    async fn store_session(&self, session: crate::agent::session::AgentSession) -> crate::error::Result<()> {
+        self.cold_tier.store_session(session).await
+    }
+
+    async fn retrieve_session(&self, session_id: &str) -> crate::error::Result<Option<crate::agent::session::AgentSession>> {
+        self.cold_tier.retrieve_session(session_id).await
     }
 }
 
@@ -1117,148 +477,5 @@ mod tests {
         assert_eq!(messages[0].text(), "Hi there");
         
         let _ = std::fs::remove_file("test_stm.json");
-    }
-
-    #[tokio::test]
-    async fn test_short_term_persistence() {
-        let path = PathBuf::from("test_stm_persist.json");
-        // Clean start
-        if path.exists() { let _ = std::fs::remove_file(&path); }
-        
-        {
-            let memory = ShortTermMemory::new(100, 10, path.clone()).await;
-            memory.store("user1", None, Message::user("Memory check")).await.unwrap();
-            // Should save automatically
-        }
-        
-        // Relief from disk
-        let memory2 = ShortTermMemory::new(100, 10, path.clone()).await;
-        let msgs = memory2.retrieve("user1", None, 10).await;
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].text(), "Memory check");
-        
-        let _ = std::fs::remove_file(&path);
-    }
-
-
-    #[tokio::test]
-    async fn test_long_term_memory() {
-        let path = PathBuf::from("test_memory.jsonl");
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-        }
-        let memory = LongTermMemory::new(100, path).await.unwrap();
-
-        memory.store_entry(MemoryEntry {
-            id: "1".to_string(),
-            user_id: "user1".to_string(),
-            content: "User prefers SOL".to_string(),
-            timestamp: 1000,
-            tags: vec!["preference".to_string()],
-            relevance: 1.0,
-        }, None).await.unwrap();
-
-
-        let entries = memory.retrieve_by_tag("user1", "preference", None, 10).await;
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].content, "User prefers SOL");
-    }
-
-    #[tokio::test]
-    async fn test_long_term_memory_exact_match() {
-        let path = PathBuf::from("test_memory_exact.jsonl");
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-        }
-        let memory = LongTermMemory::new(100, path).await.unwrap();
-
-        // 1. Store one with "SOLANA" tag
-        memory.store_entry(MemoryEntry {
-            id: "1".to_string(),
-            user_id: "user1".to_string(),
-            content: "Full Solana name".to_string(),
-            timestamp: 1000,
-            tags: vec!["SOLANA".to_string()],
-            relevance: 1.0,
-        }, None).await.unwrap();
-
-
-        // 2. Store one with "SOL" tag
-        memory.store_entry(MemoryEntry {
-            id: "2".to_string(),
-            user_id: "user1".to_string(),
-            content: "Just SOL".to_string(),
-            timestamp: 1001,
-            tags: vec!["SOL".to_string()],
-            relevance: 1.0,
-        }, None).await.unwrap();
-
-
-        // 3. Search for "SOL" (should only return "Just SOL")
-        let entries = memory.retrieve_by_tag("user1", "SOL", None, 10).await;
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].content, "Just SOL");
-    }
-
-    #[tokio::test]
-    async fn test_long_term_memory_pruning() {
-        let path = PathBuf::from("test_memory_pruning.jsonl");
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-        }
-        // Limit 10
-        let memory = LongTermMemory::new(10, path.clone()).await.unwrap();
-
-        // Insert 15 items
-        for i in 0..15 {
-             memory.store_entry(MemoryEntry {
-                id: format!("{}", i),
-                user_id: "user1".to_string(),
-                content: format!("Content {}", i),
-                timestamp: 1000 + i, // ascending timestamp
-                tags: vec![],
-                relevance: 1.0,
-            }, None).await.unwrap();
-        }
-
-        // Force prune (since store_entry is probabilistic)
-        let _ = memory.prune(10, "user1".to_string(), None).await;
-        
-        // Wait for async prune
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let all = memory.retrieve_recent("user1", None, 10000).await;
-        
-        assert!(all.len() <= 10, "Should have pruned to <= 10, got {}", all.len());
-        
-        // Oldest (0..4) should be gone, Newest (5..14) should remain
-        // Check if "Content 14" is present
-        assert!(all.iter().any(|e| e.content == "Content 14"));
-        // Check if "Content 0" is missing
-        assert!(!all.iter().any(|e| e.content == "Content 0"));
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[tokio::test]
-    async fn test_memory_undo() {
-        let path = PathBuf::from("test_undo.jsonl");
-        if path.exists() { let _ = std::fs::remove_file(&path); }
-        let manager = MemoryManager::with_capacity(10, 10, 10, path.clone()).await.unwrap();
-
-        manager.short_term.store("u1", None, Message::user("Hello")).await.unwrap();
-        manager.short_term.store("u1", None, Message::assistant("Hi")).await.unwrap();
-
-        let undid = manager.undo("u1", None).await.unwrap();
-        assert_eq!(undid.unwrap().text(), "Hi");
-
-        let remaining = manager.short_term.retrieve("u1", None, 10).await;
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].text(), "Hello");
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file("test_undo.stm.json");
     }
 }

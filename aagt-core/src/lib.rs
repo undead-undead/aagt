@@ -17,6 +17,7 @@ pub mod infra;
 pub mod knowledge;
 pub mod prelude;
 pub mod skills;
+#[cfg(feature = "trading")]
 pub mod trading;
 
 // Re-export common types for convenience

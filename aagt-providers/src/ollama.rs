@@ -55,17 +55,9 @@ impl Ollama {
 impl Provider for Ollama {
     async fn stream_completion(
         &self,
-        model: &str,
-        system_prompt: Option<&str>,
-        messages: Vec<Message>,
-        tools: Vec<ToolDefinition>,
-        temperature: Option<f64>,
-        max_tokens: Option<u64>,
-        extra_params: Option<serde_json::Value>,
+        request: aagt_core::agent::provider::ChatRequest,
     ) -> Result<StreamingResponse> {
-        self.inner
-            .stream_completion(model, system_prompt, messages, tools, temperature, max_tokens, extra_params)
-            .await
+        self.inner.stream_completion(request).await
     }
 
     fn name(&self) -> &'static str {

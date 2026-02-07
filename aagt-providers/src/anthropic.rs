@@ -194,19 +194,23 @@ impl Anthropic {
 impl Provider for Anthropic {
     async fn stream_completion(
         &self,
-        model: &str,
-        system_prompt: Option<&str>,
-        messages: Vec<Message>,
-        tools: Vec<ToolDefinition>,
-        temperature: Option<f64>,
-        max_tokens: Option<u64>,
-        _extra_params: Option<serde_json::Value>,
+        request: aagt_core::agent::provider::ChatRequest,
     ) -> Result<StreamingResponse> {
-        let request = AnthropicRequest {
+        let aagt_core::agent::provider::ChatRequest {
+            model,
+            system_prompt,
+            messages,
+            tools,
+            temperature,
+            max_tokens,
+            extra_params: _,
+        } = request;
+
+        let anthropic_request = AnthropicRequest {
             model: model.to_string(),
             messages: Self::convert_messages(messages),
             max_tokens: max_tokens.unwrap_or(4096),
-            system: system_prompt.map(|s| s.to_string()),
+            system: system_prompt,
             temperature,
             tools: Self::convert_tools(tools),
             stream: true,
@@ -216,7 +220,7 @@ impl Provider for Anthropic {
             .client
             .post(ANTHROPIC_API_URL)
             .headers(self.build_headers()?)
-            .json(&request)
+            .json(&anthropic_request)
             .send()
             .await?;
 

@@ -1,5 +1,6 @@
 pub mod tool;
 pub mod capabilities;
+pub mod runtime;
 
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
@@ -15,7 +16,9 @@ use crate::error::{Error, Result};
 use crate::skills::tool::{Tool, ToolDefinition};
 use crate::agent::context::ContextInjector;
 use crate::agent::message::Message;
+#[cfg(feature = "trading")]
 use crate::trading::risk::RiskManager;
+#[cfg(feature = "trading")]
 use crate::trading::strategy::{Action, ActionExecutor};
 
 /// Metadata extracted from a `SKILL.md` frontmatter
@@ -76,9 +79,12 @@ pub struct DynamicSkill {
     metadata: SkillMetadata,
     instructions: String,
     base_dir: PathBuf,
+    #[cfg(feature = "trading")]
     risk_manager: Option<Arc<RiskManager>>,
+    #[cfg(feature = "trading")]
     executor: Option<Arc<dyn ActionExecutor>>,
     execution_config: SkillExecutionConfig,
+    wasm_runtime: Arc<crate::skills::runtime::WasmRuntime>,
 }
 
 impl DynamicSkill {
@@ -88,19 +94,24 @@ impl DynamicSkill {
             metadata,
             instructions,
             base_dir,
+            #[cfg(feature = "trading")]
             risk_manager: None,
+            #[cfg(feature = "trading")]
             executor: None,
             execution_config: SkillExecutionConfig::default(),
+            wasm_runtime: Arc::new(crate::skills::runtime::WasmRuntime::new().expect("Failed to init WasmRuntime")),
         }
     }
 
     /// Set a risk manager for validating proposals
+    #[cfg(feature = "trading")]
     pub fn with_risk_manager(mut self, risk_manager: Arc<RiskManager>) -> Self {
         self.risk_manager = Some(risk_manager);
         self
     }
 
     /// Set an action executor for executing approved proposals
+    #[cfg(feature = "trading")]
     pub fn with_executor(mut self, executor: Arc<dyn ActionExecutor>) -> Self {
         self.executor = Some(executor);
         self
@@ -118,6 +129,7 @@ impl DynamicSkill {
     }
 }
 
+#[cfg(feature = "trading")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proposal {
     pub from_token: String,
@@ -140,6 +152,8 @@ impl Tool for DynamicSkill {
             description: self.metadata.description.clone(),
             parameters: self.metadata.parameters.clone().unwrap_or(json!({})),
             parameters_ts: self.metadata.interface.clone(),
+            is_binary: self.metadata.runtime.as_deref() == Some("wasm"),
+            is_verified: false, // Default to unverified
         }
     }
 
@@ -152,8 +166,18 @@ impl Tool for DynamicSkill {
             "python" | "python3" => "python3",
             "bash" | "sh" => "bash",
             "node" | "js" => "node",
+            "wasm" => "wasm",
             lang => lang
         };
+
+        if interpreter == "wasm" {
+            let wasm_file = self.metadata.script.as_ref().ok_or_else(|| {
+                Error::tool_execution(self.name(), "No wasm file defined for this skill".to_string())
+            })?;
+            let wasm_path = self.base_dir.join("scripts").join(wasm_file);
+            info!(tool = %self.name(), "Executing Wasm skill");
+            return self.wasm_runtime.call(&wasm_path, arguments).map_err(|e| e.into());
+        }
 
         let script_file = self.metadata.script.as_ref().ok_or_else(|| {
              Error::tool_execution(self.name(), "No script defined for this skill".to_string())
@@ -255,6 +279,7 @@ impl Tool for DynamicSkill {
         }
         
         // 🛡️ Safety Check: Parse for Proposals (unchanged logic)
+        #[cfg(feature = "trading")]
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&stdout) {
             if value.get("type").and_then(|t| t.as_str()) == Some("proposal") {
                 if let Some(proposal_data) = value.get("data") {
@@ -327,7 +352,9 @@ impl Tool for DynamicSkill {
 pub struct SkillLoader {
     pub skills: DashMap<String, Arc<DynamicSkill>>,
     base_path: PathBuf,
+    #[cfg(feature = "trading")]
     risk_manager: Option<Arc<RiskManager>>,
+    #[cfg(feature = "trading")]
     executor: Option<Arc<dyn ActionExecutor>>,
 }
 
@@ -337,18 +364,22 @@ impl SkillLoader {
         Self {
             skills: DashMap::new(),
             base_path: base_path.into(),
+            #[cfg(feature = "trading")]
             risk_manager: None,
+            #[cfg(feature = "trading")]
             executor: None,
         }
     }
 
     /// Set a risk manager for all loaded skills
+    #[cfg(feature = "trading")]
     pub fn with_risk_manager(mut self, risk_manager: Arc<RiskManager>) -> Self {
         self.risk_manager = Some(risk_manager);
         self
     }
 
     /// Set an executor for all loaded skills
+    #[cfg(feature = "trading")]
     pub fn with_executor(mut self, executor: Arc<dyn ActionExecutor>) -> Self {
         self.executor = Some(executor);
         self
@@ -364,12 +395,17 @@ impl SkillLoader {
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path.is_dir() {
-                if let Ok(mut skill) = self.load_skill(&path).await {
-                    if let Some(ref rm) = self.risk_manager {
-                        skill = skill.with_risk_manager(Arc::clone(rm));
-                    }
-                    if let Some(ref exec) = self.executor {
-                        skill = skill.with_executor(Arc::clone(exec));
+                if let Ok(skill) = self.load_skill(&path).await {
+                    #[cfg(feature = "trading")]
+                    let mut skill = skill;
+                    #[cfg(feature = "trading")]
+                    {
+                        if let Some(ref rm) = self.risk_manager {
+                            skill = skill.with_risk_manager(Arc::clone(rm));
+                        }
+                        if let Some(ref exec) = self.executor {
+                            skill = skill.with_executor(Arc::clone(exec));
+                        }
                     }
                     info!("Loaded dynamic skill: {}", skill.name());
                     self.skills.insert(skill.name(), Arc::new(skill));
@@ -429,8 +465,9 @@ impl SkillLoader {
     }
 }
 
+#[async_trait::async_trait]
 impl ContextInjector for SkillLoader {
-    fn inject(&self) -> Result<Vec<Message>> {
+    async fn inject(&self) -> Result<Vec<Message>> {
         // Redundant - ToolSet now handles tool definitions in TS style
         Ok(Vec::new())
     }
@@ -468,6 +505,8 @@ impl Tool for ReadSkillDoc {
                 "required": ["skill_name"]
             }),
             parameters_ts: Some("interface ReadSkillArgs {\n  skill_name: string; // The name of the skill to read manual for\n}".to_string()),
+            is_binary: false,
+            is_verified: true,
         }
     }
 
@@ -527,6 +566,8 @@ impl Tool for ClawHubTool {
                 "required": ["action", "query"]
             }),
             parameters_ts: Some("interface ClawHubArgs {\n  action: 'search' | 'install';\n  query: string; // Search query or skill slug\n  manager?: 'npm' | 'pnpm' | 'bun'; // Package manager (default: npm)\n}".to_string()),
+            is_binary: false,
+            is_verified: true,
         }
     }
 

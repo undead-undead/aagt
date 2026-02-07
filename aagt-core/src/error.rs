@@ -95,19 +95,23 @@ pub enum Error {
 
     // ============ Strategy Errors ============
     /// Strategy configuration error
+    #[cfg(feature = "trading")]
     #[error("Strategy configuration error: {0}")]
     StrategyConfig(String),
 
     /// Strategy execution error
+    #[cfg(feature = "trading")]
     #[error("Strategy execution error: {0}")]
     StrategyExecution(String),
 
     /// Condition evaluation error
+    #[cfg(feature = "trading")]
     #[error("Condition evaluation error: {0}")]
     ConditionEvaluation(String),
 
     // ============ Risk Control Errors ============
     /// Risk check failed - transaction blocked
+    #[cfg(feature = "trading")]
     #[error("Risk check failed: {check_name} - {reason}")]
     RiskCheckFailed {
         /// Name of the risk check
@@ -117,6 +121,7 @@ pub enum Error {
     },
 
     /// Risk limit exceeded
+    #[cfg(feature = "trading")]
     #[error("Risk limit exceeded: {limit_type} - current: {current}, max: {max}")]
     RiskLimitExceeded {
         /// Type of limit
@@ -129,6 +134,7 @@ pub enum Error {
 
     // ============ Simulation Errors ============
     /// Simulation failed
+    #[cfg(feature = "trading")]
     #[error("Simulation error: {0}")]
     Simulation(String),
 
@@ -176,6 +182,7 @@ impl Error {
     }
 
     /// Create a new risk check failed error
+    #[cfg(feature = "trading")]
     pub fn risk_check_failed(check_name: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::RiskCheckFailed {
             check_name: check_name.into(),
