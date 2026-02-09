@@ -6,8 +6,7 @@
 /// - Agent automatically calling tools based on user input
 
 use aagt_core::prelude::*;
-use aagt_core::tool::{Tool, ToolDefinition};
-use aagt_core::error::{Error, Result};
+use aagt_core::skills::tool::{Tool, ToolDefinition};
 use aagt_providers::gemini::{Gemini, GEMINI_2_0_FLASH};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -36,6 +35,10 @@ impl Tool for GetWeather {
                 },
                 "required": ["city"]
             }),
+            is_binary: false,
+            is_verified: false,
+            parameters_ts: None,
+            usage_guidelines: None,
         }
     }
 
@@ -44,10 +47,7 @@ impl Tool for GetWeather {
         struct Args {
             city: String,
         }
-        let args: Args = serde_json::from_str(arguments).map_err(|e| Error::ToolArguments {
-            tool_name: "get_weather".to_string(),
-            message: e.to_string(),
-        })?;
+        let args: Args = serde_json::from_str(arguments).map_err(|e| anyhow::anyhow!("Invalid tool arguments: {}", e))?;
 
         // In a real implementation, this would call a weather API
         Ok(format!("Weather in {}: Sunny, 25°C, Light breeze", args.city))
@@ -77,6 +77,10 @@ impl Tool for Calculate {
                 },
                 "required": ["expression"]
             }),
+            is_binary: false,
+            is_verified: false,
+            parameters_ts: None,
+            usage_guidelines: None,
         }
     }
 
@@ -85,10 +89,7 @@ impl Tool for Calculate {
         struct Args {
             expression: String,
         }
-        let args: Args = serde_json::from_str(arguments).map_err(|e| Error::ToolArguments {
-            tool_name: "calculate".to_string(),
-            message: e.to_string(),
-        })?;
+        let args: Args = serde_json::from_str(arguments).map_err(|e| anyhow::anyhow!("Invalid tool arguments: {}", e))?;
 
         // Simplified calculation (in production, use a proper parser)
         let result = match args.expression.as_str() {

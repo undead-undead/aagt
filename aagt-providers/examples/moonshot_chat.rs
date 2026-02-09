@@ -1,4 +1,4 @@
-use aagt_core::message::Message;
+use aagt_core::agent::message::Message;
 use aagt_core::agent::provider::Provider;
 use aagt_providers::moonshot::{Moonshot, MOONSHOT_V1_8K};
 use futures::StreamExt;
@@ -32,22 +32,19 @@ async fn main() -> anyhow::Result<()> {
     std::io::stdout().flush()?;
 
     let mut stream = provider
-        .stream_completion(
-            MOONSHOT_V1_8K,
-            None,
+        .stream_completion(aagt_core::agent::provider::ChatRequest {
+            model: MOONSHOT_V1_8K.to_string(),
             messages,
-            vec![],
-            Some(0.7),
-            None,
-            None,
-        )
+            temperature: Some(0.7),
+            ..Default::default()
+        })
         .await?;
 
     let mut full_response = String::new();
     while let Some(result) = stream.next().await {
         match result {
             Ok(choice) => {
-                if let aagt_core::streaming::StreamingChoice::Message(text) = choice {
+                if let aagt_core::agent::streaming::StreamingChoice::Message(text) = choice {
                     print!("{}", text);
                     std::io::stdout().flush()?;
                     full_response.push_str(&text);

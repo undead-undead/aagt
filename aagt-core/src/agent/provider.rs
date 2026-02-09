@@ -28,6 +28,8 @@ pub struct ChatRequest {
     pub max_tokens: Option<u64>,
     /// Optional provider-specific parameters
     pub extra_params: Option<serde_json::Value>,
+    /// Whether to enable explicit context caching (e.g. Anthropic cache_control)
+    pub enable_cache_control: bool,
 }
 
 /// Trait for LLM providers

@@ -92,6 +92,10 @@ impl crate::infra::observable::AgentObserver for TelegramNotifier {
             AgentEvent::Error { message } => {
                 format!("─── *error* ───\n{}", message)
             }
+            // Technical events are ignored for one-way Telegram notifications to avoid spam
+            AgentEvent::StepStart { .. } | AgentEvent::ToolExecutionStart { .. } | AgentEvent::ToolExecutionEnd { .. } => {
+                return Ok(());
+            }
         };
 
         self.notify(&message).await

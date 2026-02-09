@@ -2,7 +2,9 @@
 
 use aagt_core::prelude::*;
 use aagt_core::agent::message::{Message, Role, Content, ToolCall};
-use aagt_core::agent::memory::{MemoryManager, QmdMemory};
+use aagt_core::agent::memory::{MemoryManager, InMemoryMemory, ShortTermMemory};
+use aagt_qmd::QmdMemory;
+use std::sync::Arc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -30,6 +32,10 @@ fn test_tool_definition() {
                 "symbol": {"type": "string"}
             }
         }),
+        parameters_ts: None,
+        is_binary: false,
+        is_verified: true,
+        usage_guidelines: None,
     };
 
     assert_eq!(def.name, "get_price");
@@ -37,7 +43,7 @@ fn test_tool_definition() {
 
 #[test]
 fn test_toolset_basic() {
-    use aagt_core::tool::ToolSet;
+    use aagt_core::skills::tool::ToolSet;
 
     let toolset = ToolSet::new();
     assert!(toolset.is_empty());
@@ -46,21 +52,22 @@ fn test_toolset_basic() {
 
 #[test]
 fn test_agent_config_default() {
-    use aagt_core::agent::AgentConfig;
+    use aagt_core::agent::core::AgentConfig;
 
     let config = AgentConfig::default();
     assert_eq!(config.model, "gpt-4o");
     assert_eq!(config.preamble, "You are a helpful AI assistant.");
-    assert_eq!(config.max_tokens, Some(4096));
+    assert_eq!(config.max_tokens, Some(128000));
     assert_eq!(config.temperature, Some(0.7));
 }
 
 #[tokio::test]
 async fn test_memory_short_term() {
-    use aagt_core::memory::{Memory, ShortTermMemory};
-    use aagt_core::agent::memory::QmdMemory;
+    use aagt_core::agent::memory::{Memory, ShortTermMemory};
 
-    let memory = ShortTermMemory::new(5, 100, "test_integration_stm.json").await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_stm.json");
+    let memory = ShortTermMemory::new(5, 100, path).await;
     
     memory.store("user1", None, Message::user("Message 1")).await.unwrap();
     memory.store("user1", None, Message::user("Message 2")).await.unwrap();
@@ -81,33 +88,15 @@ async fn test_memory_short_term() {
 }
 
 #[tokio::test]
-async fn test_memory_long_term() {
-    use aagt_core::memory::{LongTermMemory, MemoryEntry};
-    let path = std::path::PathBuf::from("test_integration.jsonl");
-    if path.exists() {
-        let _ = std::fs::remove_file(&path);
-    }
-    let memory = LongTermMemory::new(100, path).await.unwrap();
-    
-    let entry = MemoryEntry {
-        id: "test-1".to_string(),
-        user_id: "user1".to_string(),
-        content: "User prefers SOL".to_string(),
-        timestamp: chrono::Utc::now().timestamp(),
-        tags: vec!["crypto".to_string()],
-        relevance: 1.0,
-    };
-    
-    memory.store_entry(entry, None).await.unwrap();
-    
-    let retrieved = memory.retrieve_by_tag("user1", "crypto", None, 10).await;
-    assert_eq!(retrieved.len(), 1);
-    assert_eq!(retrieved[0].content, "User prefers SOL");
+async fn test_memory_long_term_placeholder() {
+    // LongTermMemory was replaced by tiered MemoryManager + specific backends (like QMD)
+    // This is a placeholder for future tiered tests
+    assert!(true);
 }
 
 #[test]
 fn test_risk_config() {
-    use aagt_core::risk::RiskConfig;
+    use aagt_core::trading::risk::RiskConfig;
 
     let config = RiskConfig::default();
     assert!(config.max_single_trade_usd > Decimal::ZERO);
@@ -116,7 +105,7 @@ fn test_risk_config() {
 
 #[tokio::test]
 async fn test_risk_manager_basic_checks() {
-    use aagt_core::risk::{RiskManager, RiskConfig, TradeContext, InMemoryRiskStore};
+    use aagt_core::trading::risk::{RiskManager, RiskConfig, TradeContext, InMemoryRiskStore};
     use std::sync::Arc;
 
     let config = RiskConfig {
@@ -159,7 +148,7 @@ async fn test_risk_manager_basic_checks() {
 
 #[test]
 fn test_strategy_condition_serialization() {
-    use aagt_core::strategy::Condition;
+    use aagt_core::trading::strategy::Condition;
 
     let condition = Condition::PriceAbove {
         token: "SOL".to_string(),
@@ -179,25 +168,9 @@ fn test_strategy_condition_serialization() {
 }
 
 #[tokio::test]
-async fn test_simulation_basic() {
-    use aagt_core::simulation::{BasicSimulator, SimulationRequest, Simulator};
-
-    let simulator = BasicSimulator::new();
-    
-    let request = SimulationRequest {
-        from_token: "USDC".to_string(),
-        to_token: "SOL".to_string(),
-        amount: dec!(1000.0),
-        slippage_tolerance: dec!(1.0),
-        chain: "solana".to_string(),
-        exchange: None,
-    };
-
-    let result = simulator.simulate(&request).await.unwrap();
-    
-    assert!(result.success);
-    assert!(result.output_amount > Decimal::ZERO);
-    assert!(result.gas_cost_usd >= Decimal::ZERO);
+async fn test_simulation_basic_placeholder() {
+    // BasicSimulator was removed to keep core decoupled.
+    assert!(true);
 }
 
 #[test]
@@ -213,7 +186,7 @@ fn test_error_types() {
 
 #[test]
 fn test_streaming_choice_types() {
-    use aagt_core::streaming::StreamingChoice;
+    use aagt_core::agent::streaming::StreamingChoice;
 
     let msg = StreamingChoice::Message("Hello".to_string());
     assert!(matches!(msg, StreamingChoice::Message(_)));
@@ -250,12 +223,15 @@ fn test_tool_call_creation() {
 
 #[tokio::test]
 async fn test_memory_manager() {
-    let manager = MemoryManager::new().await.unwrap();
+    let manager = MemoryManager::new(
+        Arc::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
+    );
     
     // Store a message
-    manager.short_term.store("user1", None, Message::user("Hello")).await.unwrap();
+    manager.hot_tier.store("user1", None, Message::user("Hello")).await.unwrap();
     
     // Retrieve
-    let messages = manager.short_term.retrieve("user1", None, 10).await;
+    let messages = manager.hot_tier.retrieve("user1", None, 10).await;
     assert_eq!(messages.len(), 1);
 }

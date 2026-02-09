@@ -2,7 +2,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use aagt_core::prelude::*;
 use aagt_core::agent::multi_agent::{Coordinator, AgentRole};
-use aagt_core::agent::provider::Provider;
+use aagt_core::agent::provider::{Provider, ChatRequest};
 use anyhow::Result;
 
 // Mock provider that can be configured to return specific responses or tool calls
@@ -19,13 +19,7 @@ impl Provider for MockProvider {
 
     async fn stream_completion(
         &self,
-        _model: &str,
-        _system_prompt: Option<&str>,
-        _messages: Vec<Message>,
-        _tools: Vec<ToolDefinition>,
-        _temperature: Option<f64>,
-        _max_tokens: Option<u64>,
-        _extra_params: Option<serde_json::Value>,
+        _request: ChatRequest,
     ) -> aagt_core::error::Result<StreamingResponse> {
         use futures::stream;
         use aagt_core::agent::streaming::StreamingChoice;
@@ -45,7 +39,7 @@ impl Provider for MockProvider {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_agent_delegation() -> Result<()> {
     let coordinator = Arc::new(Coordinator::new());
 

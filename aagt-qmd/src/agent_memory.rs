@@ -35,10 +35,14 @@ impl Memory for QmdMemory {
         // or just use store_document for "Memories" (knowledge).
         
         // But the Memory trait requires "retrieve" (recent messages).
-        // This traditionally used a database table.
-        
-        // Since QmdStore is focused on documents/knowledge, let's implement store_knowledge here.
-        
+        // Since QmdStore is focused on documents/knowledge, we'll implement store_knowledge.
+        Ok(())
+    }
+
+    async fn store_knowledge(&self, _user_id: &str, _agent_id: Option<&str>, title: &str, content: &str, collection: &str) -> aagt_core::error::Result<()> {
+        let path = format!("manual/{}", uuid::Uuid::new_v4());
+        self.store.store_document(collection, &path, title, content)
+            .map_err(|e| aagt_core::error::Error::Internal(e.to_string()))?;
         Ok(())
     }
 
@@ -78,6 +82,20 @@ impl Memory for QmdMemory {
         } else {
             Ok(None)
         }
+    }
+
+    async fn fetch_document(&self, collection: &str, path: &str) -> aagt_core::error::Result<Option<Document>> {
+        let doc = self.store.get_by_path(collection, path).map_err(|e| aagt_core::error::Error::Internal(e.to_string()))?;
+        Ok(doc.map(|d| Document {
+            id: d.docid,
+            title: d.title,
+            content: d.body.unwrap_or_default(),
+            summary: d.summary,
+            collection: Some(d.collection),
+            path: Some(d.path),
+            metadata: std::collections::HashMap::new(),
+            score: 1.0,
+        }))
     }
 
     async fn clear(&self, _user_id: &str, _agent_id: Option<&str>) -> aagt_core::error::Result<()> {

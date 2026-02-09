@@ -226,6 +226,7 @@ impl Provider for Gemini {
             temperature,
             max_tokens,
             extra_params: _,
+            enable_cache_control: _,
         } = request;
 
         let gemini_request = GeminiRequest {
@@ -414,6 +415,10 @@ mod tests {
             name: "test".to_string(),
             description: "A test tool".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            is_binary: false,
+            is_verified: false,
+            parameters_ts: None,
+            usage_guidelines: None,
         }];
 
         let converted = Gemini::convert_tools(tools);

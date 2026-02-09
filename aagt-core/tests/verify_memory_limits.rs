@@ -1,10 +1,15 @@
-use aagt_core::memory::*;
-use aagt_core::message::Message;
+use aagt_core::prelude::*;
+use aagt_core::agent::memory::ShortTermMemory;
 
 #[tokio::test]
 async fn verify_short_term_memory_limits() {
+    let path = "test_limits.json";
+    if std::path::Path::new(path).exists() {
+        let _ = std::fs::remove_file(path);
+    }
+
     // Create memory with limit of 3 users
-    let memory = ShortTermMemory::new(10, 3, "test_limits.json").await;
+    let memory = ShortTermMemory::new(10, 3, path).await;
     
     // Add 3 users
     memory.store("user1", None, Message::user("Hi")).await.unwrap();
@@ -16,6 +21,8 @@ async fn verify_short_term_memory_limits() {
     assert_eq!(memory.message_count("user3", None), 1);
     
     // Add 4th user - should evict one of the others
+    // Sleep briefly to ensure timestamps are distinct if resolution is low
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     memory.store("user4", None, Message::user("Hi")).await.unwrap();
     
     // Check who was evicted.

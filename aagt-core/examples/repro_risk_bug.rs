@@ -1,9 +1,8 @@
 
 #[tokio::main]
 async fn main() {
-    use aagt_core::risk::{RiskManager, TradeContext, RiskConfig, InMemoryRiskStore};
+    use aagt_core::trading::risk::{RiskManager, TradeContext, RiskConfig, InMemoryRiskStore};
     use rust_decimal_macros::dec;
-    use std::sync::Arc;
 
     let manager = RiskManager::new().await.unwrap();
     

@@ -19,6 +19,7 @@ Rust's type-safety and ownership model provide the foundation for execution and 
 ### 2. Isolated Capability Runtimes
 Extend agent capabilities without compromising system stability.
 - **Wasm Runtime**: Sandboxed, high-performance skills written in any Wasm-compatible language (Rust, Go, etc.) with per-skill security policies.
+- **Self-Evolving Skills**: Built-in `ForgeSkill` capability allowing agents to generate, compile (Wasm), and dynamically register new tools at runtime.
 - **Python Sidecar**: gRPC-linked ipykernel for heavy data analysis, LangChain integration, and persistent Jupyter-like logic.
 
 ### 3. Persistent State Machine
@@ -31,6 +32,12 @@ Content-addressable hybrid search engine for deep historical reasoning.
 - **Tiered Search**: Seamlessly bridges Short-Term (Hot) and Long-Term (Cold/Vector) tiers.
 - **Semantic Context**: Automatic retrieval of relevant documents via BM25 and Vector Search re-ranking.
 - **Active Indexing**: Real-time background indexing of files and conversation history.
+
+### 5. Decentralized Swarming (aagt-swarm)
+Enable cross-process and internet-scale agent collaboration.
+- **libp2p Transport**: Secure communication via Noise/TLS with Kademlia DHT discovery.
+- **Gossip Orchestration**: Peer-to-peer task bidding and announcement protocols.
+- **NAT Traversal**: Automatic hole-punching for seamless connectivity across different networks.
 
 ---
 
@@ -91,6 +98,8 @@ async fn main() -> Result<()> {
 ## Support & License
 
 - **License**: MIT / Apache 2.0
-- **Donate**: 
+- If you find this collection valuable and appreciate the effort involved in obtaining and sharing these insights, please consider supporting the project.
+
+You can show your support via:
   - **Solana**: `9QFKQ3jpBSuNPLZQH1uq5GrJm4RDKue82zeVaXwazcmj`
   - **Base**: `0x4cf0b79aea1c229dfb1df9e2b40ea5dd04f37969`

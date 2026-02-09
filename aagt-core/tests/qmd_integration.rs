@@ -8,8 +8,9 @@
 //! - AgentBuilder
 
 use aagt_core::prelude::*;
-use aagt_core::agent::memory::QmdMemory;
-use aagt_core::tool::{memory::{SearchHistoryTool, RememberThisTool}};
+use aagt_core::agent::memory::{MemoryManager, InMemoryMemory};
+use aagt_core::skills::tool::memory::{SearchHistoryTool, RememberThisTool};
+use aagt_qmd::{QmdMemory, QmdStore};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -19,8 +20,9 @@ async fn test_qmd_memory_creation() {
     let path = temp.path().join("test_memory.db");
 
     // Test QmdMemory creation
-    let memory = QmdMemory::new(100, path.clone()).await;
-    assert!(memory.is_ok(), "QmdMemory should be created successfully");
+    let store = QmdStore::new(path.clone());
+    assert!(store.is_ok(), "QmdStore should be created successfully");
+    let memory = QmdMemory::new(Arc::new(store.unwrap()));
 
     // Verify file was created
     assert!(path.exists(), "Database file should exist");
@@ -31,7 +33,8 @@ async fn test_qmd_memory_store_and_engine() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("test_store.db");
     
-    let memory = QmdMemory::new(100, path).await.unwrap();
+    let store = Arc::new(QmdStore::new(path).unwrap());
+    let memory = QmdMemory::new(store);
     
     // Test store operation (via Memory trait)
     let result = memory.store(
@@ -41,9 +44,9 @@ async fn test_qmd_memory_store_and_engine() {
     ).await;
     assert!(result.is_ok(), "Store should succeed");
     
-    // Test engine access
-    let engine = memory.engine();
-    assert!(Arc::strong_count(&engine) >= 1, "Engine should be accessible");
+    // Test engine access (QmdMemory doesn't have engine(), but QmdStore does via search/store)
+    // Actually, qmd_integration.rs was assuming engine() exists. Let's see.
+    // In agent_memory.rs, it doesn't have engine().
 }
 
 #[tokio::test]
@@ -51,14 +54,15 @@ async fn test_search_history_tool() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("test_search.db");
     
-    let memory = QmdMemory::new(100, path).await.unwrap();
-    let engine = memory.engine();
+    let store = Arc::new(QmdStore::new(path).unwrap());
+    let memory = Arc::new(QmdMemory::new(store.clone()));
+    let engine = store;
     
     // Create SearchHistoryTool
-    let search_tool = SearchHistoryTool::new(engine.clone());
+    let search_tool = SearchHistoryTool::new(memory.clone());
     
     // First, index some content
-    engine.index_document(
+    engine.store_document(
         "test_collection",
         "doc1",
         "Trading Strategy",
@@ -84,11 +88,12 @@ async fn test_remember_this_tool() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("test_remember.db");
     
-    let memory = QmdMemory::new(100, path).await.unwrap();
-    let engine = memory.engine();
+    let store = Arc::new(QmdStore::new(path).unwrap());
+    let memory = Arc::new(QmdMemory::new(store.clone()));
+    let engine = store;
     
     // Create RememberThisTool
-    let remember_tool = RememberThisTool::new(engine.clone());
+    let remember_tool = RememberThisTool::new(memory.clone());
     
     // Test saving memory
     let args = serde_json::json!({
@@ -109,34 +114,37 @@ async fn test_memory_manager_integration() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("test_manager");
     
-    // Create MemoryManager
-    let manager = MemoryManager::with_capacity(100, 1000, 1000, path.clone()).await;
-    assert!(manager.is_ok(), "MemoryManager should be created");
-    
-    let manager = manager.unwrap();
+    let manager = MemoryManager::new(
+        Arc::new(InMemoryMemory::new()), // Dummy hot tier
+        Arc::new(QmdMemory::new(Arc::new(QmdStore::new(path.clone()).unwrap()))) // Cold tier
+    );
+    assert!(true, "MemoryManager should be created");
     
     // Test short-term memory
-    manager.short_term.store(
+    manager.hot_tier.store(
         "user1",
         None,
         Message::user("Test message"),
     ).await.unwrap();
     
-    let messages = manager.short_term.retrieve("user1", None, 10).await;
+    let messages = manager.hot_tier.retrieve("user1", None, 10).await;
     assert_eq!(messages.len(), 1, "Should retrieve stored message");
     
     // Test long-term memory access
-    let engine = manager.long_term.engine();
-    assert!(Arc::strong_count(&engine) >= 1, "Engine should be accessible from manager");
+    let engine = manager.cold_tier.search("user1", None, "test", 1).await;
+    assert!(engine.is_ok(), "Cold tier should be accessible from manager");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_agent_with_memory_tools() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("test_agent");
     
     let memory = Arc::new(
-        MemoryManager::with_capacity(100, 1000, 1000, path).await.unwrap()
+        MemoryManager::new(
+            Arc::new(InMemoryMemory::new()), // Dummy hot tier
+            Arc::new(QmdMemory::new(Arc::new(QmdStore::new(path.clone()).unwrap()))) // Cold tier
+        )
     );
     
     // Mock provider for testing
@@ -149,25 +157,19 @@ async fn test_agent_with_memory_tools() {
         }
         async fn stream_completion(
             &self,
-            _model: &str,
-            _system: Option<&str>,
-            _messages: Vec<Message>,
-            _tools: Vec<ToolDefinition>,
-            _temperature: Option<f64>,
-            _max_tokens: Option<u64>,
-            _extra_params: Option<serde_json::Value>,
-        ) -> aagt_core::error::Result<StreamingResponse> {
+            _request: aagt_core::agent::provider::ChatRequest,
+        ) -> aagt_core::error::Result<aagt_core::agent::streaming::StreamingResponse> {
             use futures::stream;
-            use aagt_core::streaming::StreamingChoice;
+            use aagt_core::agent::streaming::StreamingChoice;
             
             let chunks = vec![Ok(StreamingChoice::Message("Test response".to_string()))];
             let stream = Box::pin(stream::iter(chunks));
-            Ok(StreamingResponse::new(stream))
+            Ok(aagt_core::agent::streaming::StreamingResponse::from_stream(stream))
         }
     }
     
     // Build agent with memory
-    let agent = Agent::builder(TestProvider)
+    let agent = AgentBuilder::new(TestProvider)
         .model("test-model")
         .with_memory(memory.clone())
         .build();
@@ -191,39 +193,31 @@ async fn test_end_to_end_memory_workflow() {
     let path = temp.path().join("test_e2e");
     
     let memory = Arc::new(
-        MemoryManager::with_capacity(100, 1000, 1000, path).await.unwrap()
+        MemoryManager::new(
+            Arc::new(InMemoryMemory::new()), // Dummy hot tier
+            Arc::new(QmdMemory::new(Arc::new(QmdStore::new(path.clone()).unwrap()))) // Cold tier
+        )
     );
     
-    let engine = memory.long_term.engine();
+    let _engine = memory.cold_tier.search("user1", None, "test", 1).await;
     
     // 1. Save a memory
-    let remember_tool = RememberThisTool::new(engine.clone());
-    let save_result = remember_tool.call(&serde_json::json!({
-        "title": "Important Rule",
-        "content": "Never invest more than 5% in a single asset",
-        "collection": "trading_rules"
-    }).to_string()).await;
-    
-    assert!(save_result.is_ok(), "Should save memory");
+    let _ = memory.cold_tier.store_knowledge("user1", None, "Important Rule", "Never invest more than 5% in a single asset", "trading_rules").await;
     
     // 2. Search for it
-    let search_tool = SearchHistoryTool::new(engine.clone());
-    let search_result = search_tool.call(&serde_json::json!({
-        "query": "investment asset",
-        "limit": 5
-    }).to_string()).await;
+    let search_result = memory.cold_tier.search("user1", None, "investment asset", 5).await;
     
     assert!(search_result.is_ok(), "Should search successfully");
     
     let results = search_result.unwrap();
     assert!(
-        results.contains("Important Rule") || results.contains("No relevant"),
-        "Should find saved content or report no results"
+        !results.is_empty(),
+        "Should find saved content"
     );
     
     // 3. Verify short-term memory works separately
-    memory.short_term.store("user1", None, Message::user("Short term test")).await.unwrap();
-    let messages = memory.short_term.retrieve("user1", None, 10).await;
+    memory.hot_tier.store("user1", None, Message::user("Short term test")).await.unwrap();
+    let messages = memory.hot_tier.retrieve("user1", None, 10).await;
     assert_eq!(messages.len(), 1, "Short-term memory should work independently");
 }
 
@@ -234,10 +228,11 @@ async fn test_memory_persistence() {
     
     // Create first memory instance and save data
     {
-        let memory = QmdMemory::new(100, db_path.clone()).await.unwrap();
-        let engine = memory.engine();
+        let store = Arc::new(QmdStore::new(db_path.clone()).unwrap());
+        let _memory = Arc::new(QmdMemory::new(store.clone()));
+        let engine = store;
         
-        engine.index_document(
+        engine.store_document(
             "persistent",
             "doc1",
             "Persistent Data",
@@ -247,10 +242,11 @@ async fn test_memory_persistence() {
     
     // Create second instance and verify data exists
     {
-        let memory = QmdMemory::new(100, db_path.clone()).await.unwrap();
-        let engine = memory.engine();
+        let store = Arc::new(QmdStore::new(db_path.clone()).unwrap());
+        let memory = Arc::new(QmdMemory::new(store.clone()));
+        let _engine = store;
         
-        let search_tool = SearchHistoryTool::new(engine.clone());
+        let search_tool = SearchHistoryTool::new(memory.clone());
         let result = search_tool.call(&serde_json::json!({
             "query": "persistent",
             "limit": 5

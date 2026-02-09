@@ -309,6 +309,7 @@ impl Provider for OpenAI {
             temperature,
             max_tokens,
             extra_params,
+            enable_cache_control: _,
         } = request;
 
         // Check for response_format in extra_params

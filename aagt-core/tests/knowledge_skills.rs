@@ -44,7 +44,7 @@ Notes:
 
     // 5. Verify Context Injection
     println!("Test: Calling inject() on loader with {} skills...", loader.skills.len());
-    let messages = loader.inject()?;
+    let messages = loader.inject().await?;
     println!("Test: inject() returned {} messages", messages.len());
     assert_eq!(messages.len(), 1);
     

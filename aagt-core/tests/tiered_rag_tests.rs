@@ -1,5 +1,5 @@
 use aagt_core::prelude::*;
-use aagt_core::agent::memory::QmdMemory;
+use aagt_qmd::{QmdMemory, QmdStore};
 use aagt_core::skills::tool::memory::{TieredSearchTool, FetchDocumentTool};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -9,32 +9,32 @@ async fn test_semantic_deduplication_integration() {
     let temp = TempDir::new().unwrap();
     let db_path = temp.path().join("test_dedup.db");
     
-    let memory = QmdMemory::new(100, db_path.clone()).await.unwrap();
-    let engine = memory.engine();
+    let store = Arc::new(QmdStore::new(&db_path).unwrap());
+    let memory = QmdMemory::new(store.clone());
     
     // Index two semantically similar documents
-    engine.index_document(
+    store.store_document(
         "test",
         "doc1.md",
         "Bitcoin Info",
         "Bitcoin is a decentralized digital currency, without a central bank or single administrator."
     ).unwrap();
     
-    engine.index_document(
+    store.store_document(
         "test",
         "doc2.md",
         "BTC Info",
         "BTC is a peer-to-peer electronic cash system that works without a central authority."
     ).unwrap();
     
-    println!("Stats after indexing: {:?}", engine.stats());
+    println!("Stats after indexing: {:?}", store.get_stats().unwrap());
 
     // Search with a limit of 5.
-    let results = engine.search("bitcoin", 5).unwrap();
+    let results = store.search_fts("bitcoin", 5).unwrap();
     
     println!("Found {} results after deduplication for 'bitcoin'", results.len());
     for (i, res) in results.iter().enumerate() {
-        println!("Result {}: {} (score: {})", i, res.document.title, res.rrf_score);
+        println!("Result {}: {} (score: {})", i, res.document.title, res.score);
     }
     
     assert!(!results.is_empty(), "Should find at least one result for 'bitcoin'");
@@ -45,12 +45,12 @@ async fn test_tiered_search_and_fetch() {
     let temp = TempDir::new().unwrap();
     let db_path = temp.path().join("test_tiered.db");
     
-    let memory = Arc::new(QmdMemory::new(100, db_path.clone()).await.unwrap());
-    let engine = memory.engine();
+    let store = Arc::new(QmdStore::new(&db_path).unwrap());
+    let memory = Arc::new(QmdMemory::new(store.clone()));
     
     // Index a document with content
     let content = "The quick brown fox jumps over the lazy dog. This is a long document used to test tiered retrieval.";
-    engine.index_document(
+    store.store_document(
         "test",
         "fox.md",
         "Fox Story",
@@ -58,7 +58,7 @@ async fn test_tiered_search_and_fetch() {
     ).unwrap();
     
     // Manually add a summary for testing (since background worker might take time)
-    engine.update_summary("test", "fox.md", "A story about a fox and a dog.").unwrap();
+    store.update_summary("test", "fox.md", "A story about a fox and a dog.").unwrap();
     
     // Test TieredSearchTool
     let tiered_tool = TieredSearchTool::new(memory.clone());

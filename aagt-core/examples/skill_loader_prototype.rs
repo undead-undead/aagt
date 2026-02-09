@@ -24,10 +24,14 @@ impl Tool for MarkdownSkill {
             name: self.name.clone(),
             description: format!("{}\n\nINSTRUCTIONS:\n{}", self.description, self.instructions),
             parameters: self.parameters.clone(),
+            parameters_ts: None,
+            is_binary: false,
+            is_verified: true,
+            usage_guidelines: None,
         }
     }
 
-    async fn call(&self, _arguments: &str) -> Result<String> {
+    async fn call(&self, _arguments: &str) -> anyhow::Result<String> {
         if let Some(ref script) = self.script_path {
             // Logic to execute external script (Python/Node/etc)
             // This is where OpenClaw-like behavior happens

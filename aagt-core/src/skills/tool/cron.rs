@@ -75,6 +75,7 @@ impl Tool for CronTool {
             parameters_ts: Some("type Schedule = \n  | { kind: 'at', at: string } // ISO8601 timestamp\n  | { kind: 'every', intervalSecs: number };\n\ninterface CronArgs {\n  action: 'schedule' | 'list' | 'cancel';\n  name?: string;\n  schedule?: Schedule;\n  prompt?: string;\n  id?: string; // For cancel action\n}".to_string()),
             is_binary: false,
             is_verified: true,
+            usage_guidelines: Some("Use this to schedule recurring tasks or reminders. Ensure the action description is clear so you understand it when it triggers in the future.".to_string()),
         }
     }
 

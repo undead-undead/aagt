@@ -44,6 +44,7 @@ impl Tool for SearchHistoryTool {
             parameters_ts: Some("interface SearchArgs {\n  query: string; // The search query\n  limit?: number; // Max results (default: 5)\n}".to_string()),
             is_binary: false,
             is_verified: true,
+            usage_guidelines: None,
         }
     }
 
@@ -136,6 +137,7 @@ impl Tool for RememberThisTool {
             parameters_ts: Some("interface RememberArgs {\n  title: string; // Short title\n  content: string; // Detail information\n  collection?: string; // Category (default: 'general')\n}".to_string()),
             is_binary: false,
             is_verified: true,
+            usage_guidelines: Some("Use this to preserve high-value insights, user preferences, or critical rules discovered during a conversation. DO NOT use this for temporary chat context.".to_string()),
         }
     }
 
@@ -198,6 +200,7 @@ impl Tool for TieredSearchTool {
             parameters_ts: Some("interface TieredSearchArgs {\n  query: string;\n  limit?: number;\n}".to_string()),
             is_binary: false,
             is_verified: true,
+            usage_guidelines: None,
         }
     }
 
@@ -262,6 +265,7 @@ impl Tool for FetchDocumentTool {
             parameters_ts: Some("interface FetchArgs {\n  collection: string;\n  path: string;\n}".to_string()),
             is_binary: false,
             is_verified: true,
+            usage_guidelines: None,
         }
     }
 

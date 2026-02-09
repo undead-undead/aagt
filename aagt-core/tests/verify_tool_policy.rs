@@ -9,6 +9,7 @@ use std::collections::HashMap;
 struct DangerousTool;
 
 #[async_trait]
+#[async_trait]
 impl Tool for DangerousTool {
     fn name(&self) -> String { "nuke_db".to_string() }
     async fn definition(&self) -> ToolDefinition {
@@ -16,6 +17,10 @@ impl Tool for DangerousTool {
             name: "nuke_db".to_string(),
             description: "Delete everything".to_string(),
             parameters: json!({"type": "object"}),
+            parameters_ts: None,
+            is_binary: false,
+            is_verified: true,
+            usage_guidelines: None,
         }
     }
     async fn call(&self, _args: &str) -> anyhow::Result<String> {
@@ -33,26 +38,30 @@ impl Tool for SafeTool {
             name: "read_db".to_string(),
             description: "Read data".to_string(),
             parameters: json!({"type": "object"}),
+            parameters_ts: None,
+            is_binary: false,
+            is_verified: true,
+            usage_guidelines: None,
         }
     }
     async fn call(&self, _args: &str) -> anyhow::Result<String> {
-        Ok("dangerous".to_string())
+        Ok("Data read".to_string())
     }
 }
 
 // Mock provider needed for Agent construction
-use aagt_core::agent::provider::Provider;
+use aagt_core::agent::provider::{Provider, ChatRequest};
 use aagt_core::agent::streaming::StreamingResponse;
 struct MockProvider;
 #[async_trait]
 impl Provider for MockProvider {
-    async fn stream_completion(&self, _: &str, _: Option<&str>, _: Vec<Message>, _: Vec<ToolDefinition>, _: Option<f64>, _: Option<u64>, _: Option<serde_json::Value>) -> Result<StreamingResponse> {
+    async fn stream_completion(&self, _request: ChatRequest) -> Result<StreamingResponse> {
         unimplemented!()
     }
     fn name(&self) -> &'static str { "mock" }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tool_policy_disabled() {
     let mut overrides = HashMap::new();
     overrides.insert("nuke_db".to_string(), ToolPolicy::Disabled);
@@ -77,7 +86,7 @@ async fn test_tool_policy_disabled() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tool_policy_approval() {
     let mut overrides = HashMap::new();
     overrides.insert("nuke_db".to_string(), ToolPolicy::RequiresApproval);
@@ -102,7 +111,7 @@ async fn test_tool_policy_approval() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tool_policy_auto() {
     let policy = RiskyToolPolicy::default(); // Auto by default
 

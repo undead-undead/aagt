@@ -52,6 +52,7 @@ impl Tool for DelegateTool {
             parameters_ts: Some("interface DelegateArgs {\n  role: 'researcher' | 'trader' | 'risk_analyst' | 'strategist' | 'assistant';\n  task: string; // Instructions for the sub-agent\n}".to_string()),
             is_binary: false,
             is_verified: true,
+            usage_guidelines: Some("Use this when a task can be performed more efficiently by a specialized specialist or when you need to run tasks in parallel. Specify the task clearly to ensure a good bid.".to_string()),
         }
     }
 

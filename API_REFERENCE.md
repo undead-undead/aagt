@@ -57,9 +57,24 @@ High-performance Sandbox for skills.
 - Stateful code interpreter running in a dedicated Python ipykernel.
 - Supports persistent variables and library access (LangChain, Pandas).
 
+### ForgeSkill
+- Dynamic tool generation engine.
+- Supports Rust -> Wasm compilation and live registry injection.
+
 ---
 
-## Layer 4: Infrastructure & Integrations
+## Layer 4: Decentralized Transport (aagt-swarm)
+
+The P2P communication layer for multi-agent swarms.
+
+### SwarmManager
+- **libp2p Integration**: Handles identity, routing (Kademlia), and messaging (Gossipsub).
+- **Task Delegation**: Request/Bid/Accept workflow for decentralized task allocation.
+- **Discovery**: MDNS (Local) and DHT (Global) peer discovery.
+
+---
+
+## Layer 5: Infrastructure & Integrations
 
 ### MessageBus (aagt-core::bus)
 Asynchronous message router for multi-agent/multi-channel coordination.

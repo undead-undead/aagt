@@ -16,7 +16,7 @@ async fn test_persona_injection() {
     manager.add_injector(Box::new(aagt_core::agent::personality::PersonalityManager::new(persona.clone())));
     
     let history = vec![Message::user("Hello")];
-    let context = manager.build_context(&history).expect("Failed to build context");
+    let context = manager.build_context(&history).await.expect("Failed to build context");
     
     // Should have: Personality System Prompt + User Message
     assert!(context.len() >= 2);

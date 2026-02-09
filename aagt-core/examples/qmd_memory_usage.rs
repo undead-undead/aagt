@@ -15,7 +15,8 @@
 //! ```
 
 use aagt_core::prelude::*;
-use aagt_core::skills::tool::{memory::{SearchHistoryTool, RememberThisTool}};
+use aagt_core::skills::tool::memory::{SearchHistoryTool, RememberThisTool};
+use aagt_qmd::{QmdMemory, QmdStore};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -30,48 +31,14 @@ impl aagt_core::agent::provider::Provider for MockProvider {
 
     async fn stream_completion(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        messages: Vec<Message>,
-        _tools: Vec<ToolDefinition>,
-        _temperature: Option<f64>,
-        _max_tokens: Option<u64>,
-        _extra_params: Option<serde_json::Value>,
+        _request: aagt_core::agent::provider::ChatRequest,
     ) -> Result<StreamingResponse> {
-        // Mock response based on the last message
-        let last_msg = messages.last()
-            .and_then(|m| match &m.content {
-                Content::Text(t) => Some(t.as_str()),
-                Content::Parts(parts) => parts.iter().find_map(|p| {
-                    if let aagt_core::agent::message::ContentPart::Text { text } = p {
-                        Some(text.as_str())
-                    } else {
-                        None
-                    }
-                }),
-            })
-            .unwrap_or("");
-
-        let response = if last_msg.contains("tell me about") || last_msg.contains("what is") {
-            "SOL (Solana) is a high-performance blockchain platform designed for decentralized applications."
-        } else if last_msg.contains("search") || last_msg.contains("find") {
-            "I'll search for that information using the search_history tool."
-        } else if last_msg.contains("remember") || last_msg.contains("save") {
-            "I'll save that to my long-term memory using the remember_this tool."
-        } else {
-            "I understand. How can I help you with trading strategies?"
-        };
-
-        // Create a simple streaming response
+        let response = "SOL (Solana) is a high-performance blockchain platform.";
         use futures::stream;
         use aagt_core::agent::streaming::StreamingChoice;
-        
-        let chunks = vec![
-            Ok(StreamingChoice::Message(response.to_string())),
-        ];
-        
+        let chunks = vec![Ok(StreamingChoice::Message(response.to_string()))];
         let stream = Box::pin(stream::iter(chunks));
-        Ok(StreamingResponse::new(stream))
+        Ok(StreamingResponse::from_stream(stream))
     }
 }
 
@@ -93,13 +60,10 @@ async fn main() -> Result<()> {
     // 2. Create MemoryManager with QMD backend
     println!("🧠 Creating MemoryManager with QMD backend...");
     let memory = Arc::new(
-        MemoryManager::with_capacity(
-            100,   // short_term_max: keep last 100 messages in RAM
-            1000,  // short_term_users: support up to 1000 concurrent users
-            1000,  // long_term_max: keep last 1000 entries per user in QMD
-            db_path.clone(),
+        MemoryManager::new(
+            Arc::new(aagt_core::agent::memory::InMemoryMemory::new()), // Hot tier
+            Arc::new(aagt_qmd::QmdMemory::new(Arc::new(aagt_qmd::QmdStore::new(db_path.clone()).expect("Failed to create QmdStore")))) // Cold tier
         )
-        .await?
     );
     println!("✅ MemoryManager created\n");
 
@@ -120,7 +84,7 @@ async fn main() -> Result<()> {
 
     // First conversation
     let user_id = "user123";
-    memory.short_term.store(
+    memory.hot_tier.store(
         user_id,
         None,
         Message::user("Tell me about SOL"),
@@ -130,7 +94,7 @@ async fn main() -> Result<()> {
     let response = agent.prompt("Tell me about SOL").await?;
     println!("🤖 Agent: {}\n", response);
 
-    memory.short_term.store(
+    memory.hot_tier.store(
         user_id,
         None,
         Message::assistant(response.clone()),
@@ -140,8 +104,7 @@ async fn main() -> Result<()> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("💾 Saving key insight to long-term memory...\n");
 
-    let engine = memory.long_term.engine();
-    let remember_tool = RememberThisTool::new(engine.clone());
+    let remember_tool = RememberThisTool::new(memory.cold_tier.clone());
     
     let remember_args = serde_json::json!({
         "title": "SOL Overview",
@@ -157,7 +120,7 @@ async fn main() -> Result<()> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("🔍 Searching for SOL-related information...\n");
 
-    let search_tool = SearchHistoryTool::new(engine.clone());
+    let search_tool = SearchHistoryTool::new(memory.cold_tier.clone());
     let search_args = serde_json::json!({
         "query": "Solana blockchain",
         "limit": 5
@@ -170,7 +133,7 @@ async fn main() -> Result<()> {
     // 7. Show memory statistics
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("📊 Memory Statistics\n");
-    println!("  Short-term messages: {}", memory.short_term.message_count(user_id, None));
+    println!("  Short-term messages: {}", memory.hot_tier.retrieve(user_id, None, 100).await.len());
     println!("  Database path: {:?}", db_path);
     
     // 8. Demonstrate persistence
@@ -178,7 +141,7 @@ async fn main() -> Result<()> {
     println!("🔄 Testing persistence...\n");
     
     // Retrieve from short-term memory
-    let recent = memory.short_term.retrieve(user_id, None, 10).await;
+    let recent = memory.hot_tier.retrieve(user_id, None, 10).await;
     println!("✅ Retrieved {} messages from short-term memory", recent.len());
     
     for (i, msg) in recent.iter().enumerate() {

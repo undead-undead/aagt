@@ -380,13 +380,17 @@ impl RiskManager {
     pub async fn with_config(config: RiskConfig, store: Arc<dyn RiskStateStore>) -> Result<Self> {
         let (tx, rx) = mpsc::channel(100);
         
-        let actor = RiskActor {
+        let mut actor = RiskActor {
             config: config.clone(),
             state: HashMap::new(),
             store,
             receiver: rx,
             last_load_time: None,
         };
+        
+        // Load initial state from store
+        actor.handle_load().await?;
+
         tokio::spawn(async move {
             let mut actor = actor;
             loop {
@@ -570,6 +574,7 @@ impl RiskManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[tokio::test]
     async fn test_single_trade_limit() {

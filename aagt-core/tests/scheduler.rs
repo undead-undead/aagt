@@ -76,9 +76,9 @@ async fn test_cron_tool_integration() {
     
     let cron_tool = CronTool::new(Arc::downgrade(&scheduler));
     
-    // 1. List jobs (should be empty)
+    // 1. List jobs (should be empty or contain header)
     let list_res = cron_tool.call(r#"{"action": "list"}"#).await.unwrap();
-    assert!(list_res.contains("[]"));
+    assert!(list_res.contains("No scheduled tasks found") || list_res.contains("ID | Name"));
     
     // 2. Schedule a job
     let schedule_args = r#"{

@@ -1,5 +1,5 @@
 use aagt_core::prelude::*;
-use aagt_core::memory::{ShortTermMemory, Memory};
+use aagt_core::agent::memory::{ShortTermMemory, Memory};
 
 #[tokio::main]
 async fn main() -> Result<()> {

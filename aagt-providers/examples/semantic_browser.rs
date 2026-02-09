@@ -84,6 +84,10 @@ impl Tool for BrowserTool {
                 },
                 "required": ["url"]
             }),
+            is_binary: false,
+            is_verified: false,
+            parameters_ts: None,
+            usage_guidelines: None,
         }
     }
 

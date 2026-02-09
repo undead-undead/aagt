@@ -53,6 +53,7 @@ impl Tool for CodeInterpreter {
             parameters_ts: Some("interface CodeArgs {\n  code: string; // Python code to execute\n}".to_string()),
             is_binary: false,
             is_verified: true,
+            usage_guidelines: Some("Use this for data analysis, complex mathematical calculations, or file processing that cannot be done with simple search. Avoid using it for simple string manipulations.".to_string()),
         }
     }
 

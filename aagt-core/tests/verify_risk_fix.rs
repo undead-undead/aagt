@@ -1,9 +1,8 @@
 
 #[tokio::test]
 async fn test_risk_manager_negative_amount() {
-    use aagt_core::risk::{RiskManager, TradeContext, RiskConfig, InMemoryRiskStore};
+    use aagt_core::trading::risk::{RiskManager, TradeContext, RiskConfig, InMemoryRiskStore};
     use rust_decimal_macros::dec;
-    use std::sync::Arc;
 
     let manager = RiskManager::new().await.unwrap();
     

@@ -1,6 +1,6 @@
 use aagt_core::prelude::*;
-use aagt_core::skill::SkillLoader;
-use aagt_core::risk::{RiskManager, RiskConfig, InMemoryRiskStore};
+use aagt_core::skills::SkillLoader;
+use aagt_core::trading::risk::{RiskManager, RiskConfig, InMemoryRiskStore};
 use std::sync::Arc;
 use std::path::Path;
 
@@ -21,8 +21,8 @@ async fn main() -> anyhow::Result<()> {
     println!("Total skills loaded: {}", loader.skills.len());
 
     // 3. Select the swap skill and attach RiskManager
-    if let Some(skill) = loader.skills.get("solana_swap") {
-        let skill = Arc::clone(skill);
+    if let Some(skill_ref) = loader.skills.get("solana_swap") {
+        let skill = Arc::clone(skill_ref.value());
         // We need a way to wrap it or set the risk manager
         // In this implementation, SkillLoader owns it, so we might need a better way to inject RM
         // For now, let's assume we can cast or it was already set.

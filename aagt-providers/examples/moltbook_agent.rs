@@ -38,10 +38,14 @@ impl Tool for RegisterMoltbook {
                 },
                 "required": ["name", "description"]
             }),
+            is_binary: false,
+            is_verified: false,
+            parameters_ts: None,
+            usage_guidelines: None,
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args { name: String, description: String }
         let args: Args = serde_json::from_str(arguments).map_err(|e| Error::ToolArguments { tool_name: self.name(), message: e.to_string() })?;
@@ -81,10 +85,14 @@ impl Tool for CreatePost {
                 },
                 "required": ["title", "content"]
             }),
+            is_binary: false,
+            is_verified: false,
+            parameters_ts: None,
+            usage_guidelines: None,
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args { title: String, content: String, submolt: Option<String> }
         let args: Args = serde_json::from_str(arguments).map_err(|e| Error::ToolArguments { tool_name: self.name(), message: e.to_string() })?;
@@ -124,10 +132,14 @@ impl Tool for GetFeed {
                 },
                 "required": []
             }),
+            is_binary: false,
+            is_verified: false,
+            parameters_ts: None,
+            usage_guidelines: None,
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args { limit: Option<u64> }
         let args: Args = serde_json::from_str(arguments).map_err(|e| Error::ToolArguments { tool_name: self.name(), message: e.to_string() })?;
@@ -176,6 +188,10 @@ impl Tool for UpvotePost {
                 },
                 "required": ["post_id"]
             }),
+            is_binary: false,
+            is_verified: false,
+            parameters_ts: None,
+            usage_guidelines: None,
         }
     }
 

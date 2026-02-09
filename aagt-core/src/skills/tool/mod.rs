@@ -12,10 +12,12 @@ use crate::error::Error;
 pub mod code_interpreter;
 pub mod cron;
 pub mod delegation;
+pub mod forge;
 pub mod memory;
 
 pub use cron::CronTool;
 pub use delegation::DelegateTool;
+pub use forge::ForgeSkill;
 pub use memory::{RememberThisTool, SearchHistoryTool, TieredSearchTool, FetchDocumentTool};
 
 /// Definition of a tool that can be sent to the LLM
@@ -35,6 +37,8 @@ pub struct ToolDefinition {
     /// Whether the tool is verified/trusted
     #[serde(default)]
     pub is_verified: bool,
+    /// Usage guidelines for the LLM (When to use, When NOT to use)
+    pub usage_guidelines: Option<String>,
 }
 
 /// Trait for implementing tools that AI agents can call
@@ -53,7 +57,7 @@ pub trait Tool: Send + Sync {
 
 #[derive(Clone)]
 pub struct ToolSet {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: Arc<parking_lot::RwLock<HashMap<String, Arc<dyn Tool>>>>,
     /// Cached definitions to avoid async calls during prompt generation
     cached_definitions: Arc<parking_lot::RwLock<HashMap<String, ToolDefinition>>>,
 }
@@ -68,47 +72,49 @@ impl ToolSet {
     /// Create an empty toolset
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             cached_definitions: Arc::new(parking_lot::RwLock::new(HashMap::new())),
         }
     }
 
     /// Add a tool to the set
-    pub fn add<T: Tool + 'static>(&mut self, tool: T) -> &mut Self {
-        self.tools.insert(tool.name().to_string(), Arc::new(tool));
+    pub fn add<T: Tool + 'static>(&self, tool: T) -> &Self {
+        self.tools.write().insert(tool.name().to_string(), Arc::new(tool));
         self
     }
 
     /// Add a shared tool to the set
-    pub fn add_shared(&mut self, tool: Arc<dyn Tool>) -> &mut Self {
-        self.tools.insert(tool.name().to_string(), tool);
+    pub fn add_shared(&self, tool: Arc<dyn Tool>) -> &Self {
+        self.tools.write().insert(tool.name().to_string(), tool);
         self
     }
 
     /// Get a tool by name
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
-        self.tools.get(name)
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.read().get(name).cloned()
     }
 
     /// Check if a tool exists
     pub fn contains(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
+        self.tools.read().contains_key(name)
     }
 
     /// Get all tool definitions
     pub async fn definitions(&self) -> Vec<ToolDefinition> {
         let mut defs = Vec::new();
-        for (name, tool) in &self.tools {
+        let tools_snapshot = self.iter();
+        
+        for (name, tool) in tools_snapshot {
             // Check cache in a small block to ensure guard is dropped
             let cached = {
-                self.cached_definitions.read().get(name).cloned()
+                self.cached_definitions.read().get(&name).cloned()
             };
 
             if let Some(def) = cached {
                 defs.push(def);
             } else {
                 let def = tool.definition().await;
-                self.cached_definitions.write().insert(name.clone(), def.clone());
+                self.cached_definitions.write().insert(name, def.clone());
                 defs.push(def);
             }
         }
@@ -117,47 +123,45 @@ impl ToolSet {
 
     /// Call a tool by name
     pub async fn call(&self, name: &str, arguments: &str) -> anyhow::Result<String> {
-        let tool = self
-            .tools
-            .get(name)
-            .ok_or_else(|| Error::ToolNotFound(name.to_string()))?;
+        let tool = {
+            self.tools.read().get(name).cloned()
+        }.ok_or_else(|| Error::ToolNotFound(name.to_string()))?;
 
         tool.call(arguments).await
     }
 
     /// Get the number of tools
     pub fn len(&self) -> usize {
-        self.tools.len()
+        self.tools.read().len()
     }
 
     /// Check if empty
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.tools.read().is_empty()
     }
 
     /// Iterate over tools
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Arc<dyn Tool>)> {
-        self.tools.iter()
+    pub fn iter(&self) -> Vec<(String, Arc<dyn Tool>)> {
+        self.tools.read().iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect()
     }
 }
 
 #[async_trait::async_trait]
 impl crate::agent::context::ContextInjector for ToolSet {
     async fn inject(&self) -> crate::error::Result<Vec<crate::agent::message::Message>> {
-        if self.tools.is_empty() {
+        if self.is_empty() {
             return Ok(Vec::new());
         }
 
         let mut content = String::from("## Tool Definitions (TypeScript)\n\n");
         content.push_str("You have access to the following tools. Use them to fulfill the user's request.\n\n");
 
-        // Sort for determinism
-        let mut sorted_tools: Vec<_> = self.tools.iter().collect();
-        sorted_tools.sort_by_key(|(k, _)| *k);
+        let mut sorted_tools: Vec<_> = self.iter();
+        sorted_tools.sort_by_key(|(k, _)| k.clone());
 
         for (name, tool) in sorted_tools {
             let cached_def = {
-                self.cached_definitions.read().get(name).cloned()
+                self.cached_definitions.read().get(&name).cloned()
             };
 
             let def = if let Some(d) = cached_def {
@@ -169,6 +173,9 @@ impl crate::agent::context::ContextInjector for ToolSet {
             };
             
             content.push_str(&format!("### {}\n{}\n", name, def.description));
+            if let Some(guidelines) = def.usage_guidelines {
+                content.push_str(&format!("*Usage Guidelines*: {}\n", guidelines));
+            }
             if let Some(ts) = def.parameters_ts {
                 content.push_str("```typescript\n");
                 content.push_str(&ts);
@@ -219,7 +226,7 @@ impl ToolSetBuilder {
 
     /// Build the ToolSet
     pub fn build(self) -> ToolSet {
-        let mut toolset = ToolSet::new();
+        let toolset = ToolSet::new();
         for tool in self.tools {
             toolset.add_shared(tool);
         }
@@ -260,6 +267,10 @@ macro_rules! simple_tool {
                     name: $name.to_string(),
                     description: $desc.to_string(),
                     parameters: $params,
+                    usage_guidelines: None,
+                    is_binary: false,
+                    is_verified: false,
+                    parameters_ts: None,
                 }
             }
 
@@ -302,6 +313,7 @@ mod tests {
                 parameters_ts: None,
                 is_binary: false,
                 is_verified: true, // Internal tools are verified
+                usage_guidelines: None,
             }
         }
 
@@ -321,7 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_toolset() {
-        let mut toolset = ToolSet::new();
+        let toolset = ToolSet::new();
         toolset.add(EchoTool);
 
         assert!(toolset.contains("echo"));

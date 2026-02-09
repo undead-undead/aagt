@@ -8,13 +8,14 @@
 /// 5. Unified architecture
 
 use aagt_core::prelude::*;
-use aagt_core::trading::risk::TradeContext;
+use aagt_core::trading::risk::{TradeContext, RiskConfig, RiskManager, RiskCheckBuilder, InMemoryRiskStore};
 use aagt_core::skills::SkillExecutionConfig;
-use aagt_core::risk::InMemoryRiskStore;
-use aagt_core::strategy::{FileStrategyStore, PriceDirection, StrategyStore};
+use aagt_core::trading::strategy::{FileStrategyStore, Strategy, Condition, Action, PriceDirection, StrategyStore};
+use aagt_core::infra::maintenance::{MaintenanceManager, MaintenanceConfig};
+use aagt_core::infra::notification::NotifyChannel;
+use aagt_core::agent::memory::ShortTermMemory;
 use std::sync::Arc;
 use rust_decimal_macros::dec;
-use rust_decimal::Decimal;
 use anyhow::Result;
 
 #[tokio::main]
@@ -106,7 +107,6 @@ async fn main() -> Result<()> {
     let mut maintenance = MaintenanceManager::new();
     let config = MaintenanceConfig {
         memory_cleanup_interval_secs: 60,
-        file_compaction_interval_secs: 300,
         memory_inactive_timeout_secs: 1800,
     };
     
@@ -193,6 +193,8 @@ async fn main() -> Result<()> {
         env_vars: std::collections::HashMap::new(),
     };
     
+    // Just print it to simulate usage
+    println!("  ✅ Configured skill policy: {:?}", strict_config);
     println!("  ✅ Skill execution: 10s timeout, 100KB limit, network blocked");
 
     // 6. Graceful Shutdown

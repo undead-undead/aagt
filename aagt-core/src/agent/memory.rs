@@ -348,6 +348,54 @@ impl Memory for ShortTermMemory {
     }
 }
 
+/// Simple in-memory storage for testing or fast ephemeral context
+pub struct InMemoryMemory {
+    store: DashMap<String, VecDeque<Message>>,
+}
+
+impl InMemoryMemory {
+    /// Create a new in-memory storage
+    pub fn new() -> Self {
+        Self { store: DashMap::new() }
+    }
+    
+    fn key(&self, user_id: &str, agent_id: Option<&str>) -> String {
+        if let Some(agent) = agent_id {
+            format!("{}:{}", user_id, agent)
+        } else {
+            user_id.to_string()
+        }
+    }
+}
+
+#[async_trait]
+impl Memory for InMemoryMemory {
+    async fn store(&self, user_id: &str, agent_id: Option<&str>, message: Message) -> crate::error::Result<()> {
+        let key = self.key(user_id, agent_id);
+        self.store.entry(key).or_default().push_back(message);
+        Ok(())
+    }
+
+    async fn retrieve(&self, user_id: &str, agent_id: Option<&str>, limit: usize) -> Vec<Message> {
+        let key = self.key(user_id, agent_id);
+        self.store.get(&key).map(|v| {
+            let skip = v.len().saturating_sub(limit);
+            v.iter().skip(skip).cloned().collect()
+        }).unwrap_or_default()
+    }
+
+    async fn clear(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<()> {
+        let key = self.key(user_id, agent_id);
+        self.store.remove(&key);
+        Ok(())
+    }
+
+    async fn undo(&self, user_id: &str, agent_id: Option<&str>) -> crate::error::Result<Option<Message>> {
+        let key = self.key(user_id, agent_id);
+        Ok(self.store.get_mut(&key).and_then(|mut v| v.pop_back()))
+    }
+}
+
 /// Combined memory manager for tiered storage
 pub struct MemoryManager {
     /// Hot Storage Layer (e.g. In-memory or fast local cache)
@@ -455,6 +503,11 @@ impl Memory for MemoryManager {
 
     async fn retrieve_session(&self, session_id: &str) -> crate::error::Result<Option<crate::agent::session::AgentSession>> {
         self.cold_tier.retrieve_session(session_id).await
+    }
+
+    async fn fetch_document(&self, collection: &str, path: &str) -> crate::error::Result<Option<crate::knowledge::rag::Document>> {
+        // Cold tier usually holds the full documents
+        self.cold_tier.fetch_document(collection, path).await
     }
 }
 

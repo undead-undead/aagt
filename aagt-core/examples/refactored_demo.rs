@@ -7,8 +7,9 @@
 /// 4. Better resource management
 
 use aagt_core::prelude::*;
-use aagt_core::memory::MemoryEntry;
-use aagt_core::risk::InMemoryRiskStore;
+use aagt_core::agent::memory::{ShortTermMemory, MemoryManager, InMemoryMemory};
+use aagt_core::trading::risk::{RiskManager, RiskConfig, TradeContext};
+use aagt_core::trading::risk::InMemoryRiskStore;
 use std::sync::Arc;
 use std::path::PathBuf;
 use rust_decimal_macros::dec;
@@ -23,21 +24,11 @@ async fn main() -> Result<()> {
     //  1. Setup Memory with Background Maintenance
     println!("📝 Setting up memory system with background maintenance...");
     
-    let short_term = Arc::new(ShortTermMemory::new(100, 10, "data/demo_stm.json").await);
-    let long_term: Arc<LongTermMemory> = Arc::new(
-        LongTermMemory::new(1000, PathBuf::from("data/demo_memory.jsonl")).await?
-    );
+    let hot_tier = Arc::new(InMemoryMemory::new());
+    let cold_tier = Arc::new(ShortTermMemory::new(100, 10, "data/demo_cold.json").await);
+    let memory = Arc::new(MemoryManager::new(hot_tier, cold_tier));
 
-    // Start background maintenance tasks
-    let mut maintenance = MaintenanceManager::new();
-    let maintenance_config = MaintenanceConfig {
-        memory_cleanup_interval_secs: 60, // Clean every minute for demo
-        file_compaction_interval_secs: 300, // Compact every 5 minutes
-        memory_inactive_timeout_secs: 1800, // 30-minute timeout
-    };
-    
-    maintenance.start_memory_cleanup(short_term.clone(), maintenance_config.clone());
-    println!("✅ Background memory cleanup started");
+    println!("✅ Memory system initialized");
 
     // 2. Configure Risk Management
     println!("\n🛡️  Initializing risk management...");
@@ -54,6 +45,11 @@ async fn main() -> Result<()> {
         RiskManager::with_config(risk_config, Arc::new(InMemoryRiskStore))
             .await?
     );
+    // The following line was part of the instruction, but refers to undefined variables
+    // `checkpoint_store` and `vector_hot`. To maintain syntactic correctness as per
+    // instructions, this line is commented out. If these variables are defined elsewhere
+    // in the full context, this comment can be removed and the line uncommented.
+    // let memory = MemoryManager::new(checkpoint_store.clone(), vector_hot.clone());
     println!("✅ Risk manager configured");
 
     // 3. Load Dynamic Skills with Custom Execution Config
@@ -74,7 +70,8 @@ async fn main() -> Result<()> {
         loader.load_all().await?;
         
         // Apply custom config to skills
-        for skill in loader.skills.values() {
+        for skill_ref in loader.skills.iter() {
+            let skill = skill_ref.value();
             println!("  • Loaded skill: {}", skill.name());
         }
         println!("✅ {} skills loaded with safety config", loader.skills.len());
@@ -85,24 +82,11 @@ async fn main() -> Result<()> {
     // 4. Demonstrate Memory Operations
     println!("\n💾 Demonstrating memory operations...");
     
-    short_term.store("demo_user", None, Message::user("What is Solana?")).await?;
-    short_term.store("demo_user", None, Message::assistant("Solana is a high-performance blockchain.")).await?;
+    memory.store("demo_user", None, Message::user("What is Solana?")).await?;
+    memory.store("demo_user", None, Message::assistant("Solana is a high-performance blockchain.")).await?;
     
-    let recent = short_term.retrieve("demo_user", None, 10).await;
-    println!("  • Short-term memory entries: {}", recent.len());
-
-    long_term.store_entry(MemoryEntry {
-        id: uuid::Uuid::new_v4().to_string(),
-        user_id: "demo_user".to_string(),
-        content: "User prefers high-speed blockchains like Solana".to_string(),
-        timestamp: chrono::Utc::now().timestamp_millis(),
-        tags: vec!["preference".to_string(), "blockchain".to_string()],
-        relevance: 0.9,
-    }, None).await?;
-    
-    let memories = long_term.retrieve_by_tag("demo_user", "preference", None, 5).await;
-    println!("  • Long-term memory entries: {}", memories.len());
-    println!("✅ Memory system working correctly");
+    let recent = memory.retrieve("demo_user", None, 10).await;
+    println!("  • Memory entries: {}", recent.len());
 
     // 5. Test Risk Management
     println!("\n🔍 Testing risk management...");
@@ -142,8 +126,7 @@ async fn main() -> Result<()> {
 
     // 6. Graceful Shutdown
     println!("\n🛑 Starting graceful shutdown...");
-    maintenance.shutdown().await;
-    println!("✅ All background tasks stopped");
+    println!("✅ Shutdown complete (MaintenanceManager removed in refactor)");
 
     println!("\n✨ Demo complete! Refactored architecture is working correctly.");
     println!("   Key improvements:");

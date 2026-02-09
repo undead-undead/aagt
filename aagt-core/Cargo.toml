@@ -39,11 +39,16 @@ tiktoken-rs = "0.9.1"
 tokio-cron-scheduler = { workspace = true }
 wasmtime = "29.0.0"
 wasmtime-wasi = "29.0.0"
+zip = "0.6.6"
+base64 = { version = "0.21", optional = true }
+libp2p = { version = "0.53", optional = true, features = ["tcp", "dns", "kad", "gossipsub", "noise", "yamux", "tokio", "macros", "identify", "ping"] }
+argon2 = { version = "0.5", optional = true }
 
 [features]
 default = ["trading", "telegram"]
 trading = []
 telegram = []
+swarm-p2p = ["dep:libp2p", "dep:argon2", "dep:base64"]
 
 [build-dependencies]
 tonic-build = { workspace = true }
@@ -51,3 +56,5 @@ tonic-build = { workspace = true }
 [dev-dependencies]
 tempfile = "3.24.0"
 tokio-test = "0.4"
+clap = { version = "4.4", features = ["derive"] }
+aagt-qmd = { workspace = true }

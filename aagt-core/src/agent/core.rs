@@ -21,6 +21,8 @@ use crate::agent::cache::Cache;
 use crate::agent::scheduler::Scheduler;
 use crate::skills::tool::{DelegateTool, CronTool};
 use crate::infra::notification::{Notifier, NotifyChannel};
+use crate::agent::swarm::manager::{SwarmManager, SwarmEvent};
+use tokio::sync::mpsc;
 
 /// Configuration for an Agent
 #[derive(Debug, Clone)]
@@ -51,6 +53,14 @@ pub struct AgentConfig {
     pub role: AgentRole,
     /// Max parallel tool calls (default: 5)
     pub max_parallel_tools: usize,
+    /// Loop detection similarity threshold (0.0 to 1.0, default: 0.8)
+    pub loop_similarity_threshold: f64,
+    /// Standard Operating Procedure / Mission Statement
+    pub sop: Option<String>,
+    /// Whether to enable explicit context caching (e.g. Anthropic cache_control)
+    pub enable_cache_control: bool,
+    /// Whether to use summarization for pruned history instead of truncation
+    pub smart_pruning: bool,
 }
 
 impl Default for AgentConfig {
@@ -60,15 +70,19 @@ impl Default for AgentConfig {
             model: "gpt-4o".to_string(),
             preamble: "You are a helpful AI assistant.".to_string(),
             temperature: Some(0.7),
-            max_tokens: Some(4096),
+            max_tokens: Some(128000), // Updated to larger context window default
             extra_params: None,
             tool_policy: RiskyToolPolicy::default(),
             max_history_messages: 20,
-            max_tool_output_chars: 4096,
+            max_tool_output_chars: 8192, // Increased for better tool results
             json_mode: false,
             persona: None,
             role: AgentRole::Assistant,
             max_parallel_tools: 5,
+            loop_similarity_threshold: 0.8,
+            sop: None,
+            enable_cache_control: false,
+            smart_pruning: false,
         }
     }
 }
@@ -109,11 +123,17 @@ impl Default for RiskyToolPolicy {
 pub enum AgentEvent {
     /// Agent started thinking (prompt received)
     Thinking { prompt: String },
-    /// Agent decided to use a tool
+    /// A new reasoning step/turn started
+    StepStart { step: usize },
+    /// Agent decided to use a tool (planning phase)
     ToolCall { tool: String, input: String },
+    /// Tool execution actually started (technical event)
+    ToolExecutionStart { tool: String, input: String },
+    /// Tool execution finished (technical event)
+    ToolExecutionEnd { tool: String, output_preview: String, duration_ms: u64, success: bool },
     /// Tool execution requires approval
     ApprovalPending { tool: String, input: String },
-    /// Tool execution finished
+    /// Tool execution result received (semantic event)
     ToolResult { tool: String, output: String },
     /// Agent generated a final response
     Response { content: String },
@@ -191,6 +211,7 @@ impl crate::skills::tool::Tool for AskUserTool {
             parameters_ts: Some("interface AskUserArgs {\n  /** The question to ask the user */\n  question: string;\n}".to_string()),
             is_binary: false,
             is_verified: true,
+            usage_guidelines: Some("Use this only when you need critical missing information or explicit permission to proceed with a dangerous action (e.g., executing a trade). Avoid asking for obvious or non-essential details.".to_string()),
         }
     }
 
@@ -244,6 +265,9 @@ pub struct Agent<P: Provider> {
     notifier: Option<Arc<dyn Notifier>>,
     memory: Option<Arc<dyn Memory>>,
     session_id: Option<String>,
+    swarm_manager: Option<Arc<tokio::sync::Mutex<SwarmManager>>>,
+    swarm_command_rx: Option<Arc<tokio::sync::Mutex<mpsc::Receiver<SwarmEvent>>>>, // Wrapped in Mutex for easy sharing/cloning if needed, though Agent is immutable usually. 
+    // Actually, receiver is not Sync usually. Arc<Mutex> is required if Agent is shared across threads.
 }
 
 impl<P: Provider> Agent<P> {
@@ -321,12 +345,15 @@ impl<P: Provider> Agent<P> {
     pub async fn chat(&self, mut messages: Vec<Message>) -> Result<String> {
         let mut steps = 0;
         const MAX_STEPS: usize = 15;
-
+        let mut history = crate::agent::history::QueryHistory::new();
+        
         loop {
             if steps >= MAX_STEPS {
                 return Err(Error::agent_config("Max agent steps exceeded"));
             }
             steps += 1;
+            
+            self.emit(AgentEvent::StepStart { step: steps });
 
             if let Some(last) = messages.last() {
                  if last.role == Role::User {
@@ -420,8 +447,37 @@ impl<P: Provider> Agent<P> {
             use futures::stream;
             
             let current_messages = Arc::new(messages.clone());
+            let threshold = self.config.loop_similarity_threshold;
             
-            let results: Vec<crate::error::Result<(String, String, String)>> = stream::iter(tool_calls)
+            // Check for potential loops before execution
+            let mut processed_calls = Vec::new();
+            for (id, name, args) in tool_calls {
+                let args_str = args.to_string();
+                if let Some(warning) = history.check_loop(&name, &args_str, threshold) {
+                    tracing::warn!(tool = %name, "Loop detected: {}", warning);
+                    // Inject warning as a tool result immediately instead of calling the tool
+                    messages.push(Message {
+                        role: Role::Tool,
+                        name: None,
+                        content: Content::Parts(vec![crate::agent::message::ContentPart::ToolResult {
+                            tool_call_id: id,
+                            content: format!("Error: Potential loop detected. {}", warning),
+                            name: Some(name),
+                        }]),
+                    });
+                } else {
+                    // Not a loop, proceed with execution
+                    history.record(name.clone(), args_str.clone());
+                    processed_calls.push((id, name, args));
+                }
+            }
+
+            if processed_calls.is_empty() && !messages.is_empty() {
+                // All calls were loops, continue to next iteration where LLM will see the warnings
+                continue;
+            }
+
+            let results: Vec<crate::error::Result<(String, String, String)>> = stream::iter(processed_calls)
                 .map(|(id, name, args)| {
                     let name_clone = name.clone();
                     let id_clone = id.clone();
@@ -446,6 +502,12 @@ impl<P: Provider> Agent<P> {
                             }
                         }
 
+                        let start_time = std::time::Instant::now();
+                        let _ = events.send(AgentEvent::ToolExecutionStart { 
+                            tool: name_clone.clone(), 
+                            input: args_str.clone() 
+                        });
+
                         let result = match effective_policy {
                             ToolPolicy::Disabled => {
                                 Err(Error::tool_execution(name_clone.clone(), "Tool execution is disabled by policy".to_string()))
@@ -465,10 +527,6 @@ impl<P: Provider> Agent<P> {
                                 // Ask approval handler
                                 match approval_handler.approve(&name_clone, &args_str).await {
                                     Ok(true) => {
-                                        let _ = events.send(AgentEvent::ToolCall { 
-                                            tool: name_clone.clone(), 
-                                            input: args_str.clone() 
-                                        });
                                         tools.call(&name_clone, &args_str).await
                                             .map_err(|e| Error::tool_execution(name_clone.clone(), e.to_string()))
                                     }
@@ -481,17 +539,28 @@ impl<P: Provider> Agent<P> {
                                 }
                             }
                             ToolPolicy::Auto => {
-                                let _ = events.send(AgentEvent::ToolCall { 
-                                    tool: name_clone.clone(), 
-                                    input: args_str.clone() 
-                                });
                                 tools.call(&name_clone, &args_str).await
                                     .map_err(|e| Error::tool_execution(name_clone.clone(), e.to_string()))
                             }
                         };
+
+                        let duration = start_time.elapsed().as_millis() as u64;
                         
                         match result {
                             Ok(output) => {
+                                let preview = if output.len() > 100 {
+                                    format!("{}...", &output[..100])
+                                } else {
+                                    output.clone()
+                                };
+                                
+                                let _ = events.send(AgentEvent::ToolExecutionEnd { 
+                                    tool: name_clone.clone(), 
+                                    output_preview: preview,
+                                    duration_ms: duration,
+                                    success: true
+                                });
+
                                 let _ = events.send(AgentEvent::ToolResult { 
                                     tool: name_clone.clone(), 
                                     output: output.clone() 
@@ -499,6 +568,13 @@ impl<P: Provider> Agent<P> {
                                 Ok((id_clone, name_clone, output))
                             },
                             Err(e) => {
+                                let _ = events.send(AgentEvent::ToolExecutionEnd { 
+                                    tool: name_clone.clone(), 
+                                    output_preview: e.to_string(),
+                                    duration_ms: duration,
+                                    success: false
+                                });
+
                                 let _ = events.send(AgentEvent::Error { message: e.to_string() });
                                 Ok((id_clone, name_clone, format!("Error: {}", e)))
                             }
@@ -552,6 +628,7 @@ impl<P: Provider> Agent<P> {
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
             extra_params: Some(extra),
+            enable_cache_control: self.config.enable_cache_control,
         };
 
         self.provider.stream_completion(request).await
@@ -633,8 +710,72 @@ impl<P: Provider> Agent<P> {
     ) -> Result<()> {
         info!("Agent {} starting proactive loop", self.config.name);
         
+        // Start Swarm Manager background task
+        if let Some(swarm) = &self.swarm_manager {
+            let swarm = swarm.clone();
+            tokio::spawn(async move {
+                loop {
+                    // Lock and process
+                    {
+                        let mut manager = swarm.lock().await;
+                        if let Err(e) = manager.process_inbox().await {
+                            tracing::debug!("Swarm inbox error: {}", e);
+                        }
+                    }
+                    // Small sleep to prevent busy loop since process_inbox uses try_recv
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            });
+            info!("Swarm manager background task started");
+        }
+        
+        // Prepare swarm command rx if available
+        let mut swarm_rx_guard = if let Some(rx_mutex) = &self.swarm_command_rx {
+             Some(rx_mutex.lock().await)
+        } else {
+             None
+        };
+        
         loop {
             tokio::select! {
+                // Handle swarm commands
+                Some(cmd) = async {
+                    if let Some(guard) = &mut swarm_rx_guard {
+                        guard.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                     match cmd {
+                        SwarmEvent::ExecuteTask { request_id, task, context: _ } => {
+                            info!("Swarm: Executing delegated task {}: {}", request_id, task);
+                            // Execute task using agent's process
+                            let result = match self.process(&task).await {
+                                Ok(output) => {
+                                    info!("Swarm: Task execution success");
+                                    output
+                                },
+                                Err(e) => {
+                                    error!("Swarm: Task execution failed: {}", e);
+                                    format!("Error: {}", e)
+                                }
+                            };
+                            
+                            // Send result back
+                            if let Some(swarm) = &self.swarm_manager {
+                                let mut manager = swarm.lock().await;
+                                let success = !result.starts_with("Error:");
+                                if let Err(e) = manager.send_result(&request_id, result, success).await {
+                                     error!("Failed to send swarm result: {}", e);
+                                }
+                            }
+                        }
+                        SwarmEvent::TaskResult { request_id, result, success } => {
+                             info!("Swarm: Request {} completed. Success: {}. Result: {}", request_id, success, result);
+                        }
+                     }
+                }
+
                 // 1. Handle user input
                 input = user_input.recv() => {
                     match input {
@@ -687,6 +828,8 @@ pub struct AgentBuilder<P: Provider> {
     has_dynamic_skill: bool,
     memory: Option<Arc<dyn Memory>>,
     session_id: Option<String>,
+    swarm_manager: Option<Arc<tokio::sync::Mutex<SwarmManager>>>,
+    swarm_command_rx: Option<mpsc::Receiver<SwarmEvent>>,
 }
 
 impl<P: Provider> AgentBuilder<P> {
@@ -705,6 +848,8 @@ impl<P: Provider> AgentBuilder<P> {
             has_dynamic_skill: false,
             memory: None,
             session_id: None,
+            swarm_manager: None,
+            swarm_command_rx: None,
         }
     }
 
@@ -810,34 +955,35 @@ impl<P: Provider> AgentBuilder<P> {
     }
 
     /// Add a tool
-    pub fn tool<T: Tool + 'static>(mut self, tool: T) -> Self {
+    pub fn tool<T: Tool + 'static>(self, tool: T) -> Self {
         self.tools.add(tool);
         self
     }
 
     /// Add a shared tool
-    pub fn shared_tool(mut self, tool: Arc<dyn Tool>) -> Self {
+    pub fn shared_tool(self, tool: Arc<dyn Tool>) -> Self {
         self.tools.add_shared(tool);
         self
     }
 
     /// Add multiple tools from a toolset
-    pub fn tools(mut self, tools: ToolSet) -> Self {
+    pub fn tools(self, tools: ToolSet) -> Self {
         for (_, tool) in tools.iter() {
-            self.tools.add_shared(Arc::clone(tool));
+            self.tools.add_shared(tool);
         }
         self
     }
 
     /// Add memory tools using the provided memory implementation
-    pub fn with_memory(mut self, memory: Arc<dyn crate::agent::memory::Memory>) -> Self {
+    pub fn with_memory(self, memory: Arc<dyn crate::agent::memory::Memory>) -> Self {
         self.tools.add(SearchHistoryTool::new(memory.clone()));
         self.tools.add(RememberThisTool::new(memory.clone()));
         self.tools.add(TieredSearchTool::new(memory.clone()));
         self.tools.add(FetchDocumentTool::new(memory.clone()));
         
-        self.memory = Some(memory);
-        self
+        let mut builder = self;
+        builder.memory = Some(memory);
+        builder
     }
 
     /// Add DynamicSkill support (ClawHub skills, custom scripts)
@@ -867,9 +1013,21 @@ impl<P: Provider> AgentBuilder<P> {
             self.tools.add_shared(Arc::clone(skill_ref.value()) as Arc<dyn crate::skills::tool::Tool>);
         }
         
-        // Add ClawHub and ReadSkillDoc tools
+        // Add ClawHub, ReadSkillDoc and ForgeSkill tools
         self.tools.add(crate::skills::ClawHubTool::new(Arc::clone(&skill_loader)));
-        self.tools.add(crate::skills::ReadSkillDoc::new(skill_loader));
+        self.tools.add(crate::skills::ReadSkillDoc::new(Arc::clone(&skill_loader)));
+        let github_compiler = if let (Ok(token), Ok(repo)) = (std::env::var("GITHUB_TOKEN"), std::env::var("GITHUB_REPO")) {
+            Some(crate::skills::compiler::GithubCompiler::new(repo, token, self.notifier.clone()))
+        } else {
+            None
+        };
+
+        self.tools.add(crate::skills::tool::ForgeSkill::new(
+            Arc::clone(&skill_loader),
+            self.tools.clone(),
+            skill_loader.base_path.clone(),
+            github_compiler
+        ));
         
         self.has_dynamic_skill = true;
         
@@ -934,8 +1092,10 @@ impl<P: Provider> AgentBuilder<P> {
             let skill_loader = Arc::new(crate::skills::SkillLoader::new("./skills"));
             
             // Attempt to load skills (non-fatal if directory doesn't exist)
+            // Capture handle before entering blocking context
+            let handle = tokio::runtime::Handle::current();
             match tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(skill_loader.load_all())
+                handle.block_on(skill_loader.load_all())
             }) {
                 Ok(_) => {
                     info!("Loaded DynamicSkills from ./skills");
@@ -945,9 +1105,21 @@ impl<P: Provider> AgentBuilder<P> {
                         self.tools.add_shared(Arc::clone(skill_ref.value()) as Arc<dyn crate::skills::tool::Tool>);
                     }
                     
-                    // Add ClawHub and ReadSkillDoc tools
+                    // Add ClawHub, ReadSkillDoc and ForgeSkill tools
                     self.tools.add(crate::skills::ClawHubTool::new(Arc::clone(&skill_loader)));
-                    self.tools.add(crate::skills::ReadSkillDoc::new(skill_loader));
+                    self.tools.add(crate::skills::ReadSkillDoc::new(Arc::clone(&skill_loader)));
+                    let github_compiler = if let (Ok(token), Ok(repo)) = (std::env::var("GITHUB_TOKEN"), std::env::var("GITHUB_REPO")) {
+                        Some(crate::skills::compiler::GithubCompiler::new(repo, token, self.notifier.clone()))
+                    } else {
+                        None
+                    };
+
+                    self.tools.add(crate::skills::tool::ForgeSkill::new(
+                        Arc::clone(&skill_loader),
+                        self.tools.clone(),
+                        skill_loader.base_path.clone(),
+                        github_compiler
+                    ));
                     
                     self.has_dynamic_skill = true;
                 },
@@ -961,13 +1133,17 @@ impl<P: Provider> AgentBuilder<P> {
 
         let (tx, _) = broadcast::channel(1000);
 
-        let mut context_config = ContextConfig::default();
-        context_config.max_history_messages = self.config.max_history_messages;
-        if let Some(tokens) = self.config.max_tokens {
-            // Rough heuristic: Context window is usually larger than max_tokens (generation limit)
-            // But we don't have model context window size in config yet.
-            // For now, let's just ensure we respect max_history_messages primarily.
-            context_config.response_reserve = tokens as usize;
+        let mut context_config = ContextConfig {
+            max_tokens: self.config.max_tokens.unwrap_or(128000) as usize,
+            max_history_messages: self.config.max_history_messages,
+            response_reserve: 4096, // Use a fixed safe reserve for responses
+            enable_cache_control: self.config.enable_cache_control,
+            smart_pruning: self.config.smart_pruning,
+        };
+
+        // Ensure response_reserve doesn't eat more than 50% of context
+        if context_config.response_reserve > context_config.max_tokens / 2 {
+            context_config.response_reserve = context_config.max_tokens / 2;
         }
 
         let mut context_manager = ContextManager::new(context_config);
@@ -986,15 +1162,15 @@ impl<P: Provider> AgentBuilder<P> {
         }
 
         // Auto-register AskUser tool if handler available
-        let mut tools = self.tools;
+        let tools = self.tools;
         if let Some(handler) = &self.interaction_handler {
             tools.add(AskUserTool { handler: Arc::clone(handler) });
         }
 
-        Ok(Agent {
+        let mut agent = Agent {
             provider: Arc::new(self.provider),
             tools,
-            config: self.config,
+            config: self.config.clone(),
             context_manager,
             events: tx,
             approval_handler: self.approval_handler.unwrap_or_else(|| Arc::new(RejectAllApprovalHandler)),
@@ -1002,18 +1178,41 @@ impl<P: Provider> AgentBuilder<P> {
             notifier: self.notifier,
             memory: self.memory,
             session_id: self.session_id,
-        })
+            swarm_manager: self.swarm_manager,
+            swarm_command_rx: self.swarm_command_rx.map(|rx| Arc::new(tokio::sync::Mutex::new(rx))),
+        };
+
+        // Inject SOP into system prompt if exists
+        if let Some(sop) = &agent.config.sop {
+            agent.context_manager.set_system_prompt(format!("### Standard Operating Procedure (SOP)\n{}\n", sop));
+            
+            // Also sync with SwarmManager if it exists
+            if let Some(swarm) = &agent.swarm_manager {
+                if let Ok(mut manager) = swarm.try_lock() {
+                    manager.set_sop(Some(sop.clone()));
+                }
+            }
+        }
+
+        Ok(agent)
     }
 
     /// Add delegation support using the provided coordinator
-    pub fn with_delegation(mut self, coordinator: Arc<Coordinator>) -> Self {
+    pub fn with_delegation(self, coordinator: Arc<Coordinator>) -> Self {
         self.tools.add(DelegateTool::new(Arc::downgrade(&coordinator)));
         self
     }
 
     /// Add scheduling support using the provided scheduler
-    pub fn with_scheduler(mut self, scheduler: Arc<Scheduler>) -> Self {
+    pub fn with_scheduler(self, scheduler: Arc<Scheduler>) -> Self {
         self.tools.add(CronTool::new(Arc::downgrade(&scheduler)));
+        self
+    }
+
+    /// Enable dynamic swarming capabilities
+    pub fn with_swarm(mut self, manager: Arc<tokio::sync::Mutex<crate::agent::swarm::manager::SwarmManager>>, cmd_rx: mpsc::Receiver<SwarmEvent>) -> Self {
+        self.swarm_manager = Some(manager);
+        self.swarm_command_rx = Some(cmd_rx);
         self
     }
 }
@@ -1049,6 +1248,6 @@ mod tests {
     fn test_agent_config_default() {
         let config = AgentConfig::default();
         assert_eq!(config.model, "gpt-4o");
-        assert_eq!(config.max_tokens, Some(4096));
+        assert_eq!(config.max_tokens, Some(128000));
     }
 }

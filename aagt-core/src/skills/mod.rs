@@ -1,6 +1,7 @@
 pub mod tool;
 pub mod capabilities;
 pub mod runtime;
+pub mod compiler;
 
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
@@ -44,6 +45,8 @@ pub struct SkillMetadata {
     /// Kind of skill (e.g., 'tool', 'knowledge', 'agent')
     #[serde(default = "default_skill_kind")]
     pub kind: String,
+    /// Optional usage guidelines for LLM reasoning
+    pub usage_guidelines: Option<String>,
 }
 
 fn default_skill_kind() -> String {
@@ -154,6 +157,7 @@ impl Tool for DynamicSkill {
             parameters_ts: self.metadata.interface.clone(),
             is_binary: self.metadata.runtime.as_deref() == Some("wasm"),
             is_verified: false, // Default to unverified
+            usage_guidelines: self.metadata.usage_guidelines.clone(),
         }
     }
 
@@ -195,77 +199,75 @@ impl Tool for DynamicSkill {
         
         info!(tool = %self.name(), "Executing dynamic skill (Runtime: {})", runtime_type);
 
-        // Check for Bubblewrap (bwrap)
         let has_bwrap = which::which("bwrap").is_ok();
-        
-        // Safety Enforcement: Bubblewrap is required for secure execution
-        if !has_bwrap {
+        let unsafe_override = std::env::var("AAGT_UNSAFE_SKILL_EXEC").map(|v| v == "true").unwrap_or(false);
+        let timeout = std::time::Duration::from_secs(self.execution_config.timeout_secs);
+
+        if !has_bwrap && !unsafe_override {
              return Err(Error::tool_execution(
-                 self.name(), 
-                 "Security Error: 'bwrap' (Bubblewrap) sandbox is not installed on the system. Cannot execute skill securely."
+                  self.name(), 
+                 "Security Error: 'bwrap' (Bubblewrap) sandbox is not installed on the system. Cannot execute skill securely. \
+                 To bypass this for testing, set AAGT_UNSAFE_SKILL_EXEC=true."
              ).into());
         }
 
-        let mut cmd = tokio::process::Command::new("bwrap");
-        
-        // 1. Root is read-only
-        cmd.arg("--ro-bind").arg("/").arg("/");
-        
-        // 2. Devices
-        cmd.arg("--dev").arg("/dev");
-        cmd.arg("--proc").arg("/proc");
-        
-        // 3. Private /tmp
-        cmd.arg("--tmpfs").arg("/tmp");
-        
-        // 4. Bind current directory (so script can be read/write in project)
-        if let Ok(cwd) = std::env::current_dir() {
-            cmd.arg("--bind").arg(&cwd).arg(&cwd);
-        }
-        
-        // 5. Network Isolation (Enforced by default unless configured otherwise)
-        if !self.execution_config.allow_network {
-            cmd.arg("--unshare-net");
-        }
-        
-        // 6. The actual command
-        cmd.arg(interpreter);
+        let output = if !has_bwrap && unsafe_override {
+            warn!(tool = %self.name(), "UNSAFE EXECUTION: Running skill without Bubblewrap sandbox override.");
+            let mut cmd = tokio::process::Command::new(interpreter);
+            cmd.arg(&script_full_path);
+            cmd.arg(arguments);
+            cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+            for (key, value) in &self.execution_config.env_vars { cmd.env(key, value); }
+            
+            let child = cmd.spawn()
+                .map_err(|e| Error::ToolExecution { 
+                    tool_name: self.name(), 
+                    message: format!("Failed to spawn process: {}", e) 
+                })?;
 
-        // Add script path
-        cmd.arg(&script_full_path);
-        
-        // Pass arguments as JSON string
-        cmd.arg(arguments);
+            tokio::time::timeout(timeout, child.wait_with_output())
+                .await
+                .map_err(|_| Error::ToolExecution { 
+                    tool_name: self.name(), 
+                    message: "Execution timed out".to_string() 
+                })?
+                .map_err(|e| Error::ToolExecution { 
+                    tool_name: self.name(), 
+                    message: format!("Process failed: {}", e) 
+                })?
+        } else {
+            let mut cmd = tokio::process::Command::new("bwrap");
+            cmd.arg("--ro-bind").arg("/").arg("/");
+            cmd.arg("--dev").arg("/dev");
+            cmd.arg("--proc").arg("/proc");
+            cmd.arg("--tmpfs").arg("/tmp");
+            if let Ok(cwd) = std::env::current_dir() {
+                cmd.arg("--bind").arg(&cwd).arg(&cwd);
+            }
+            if !self.execution_config.allow_network {
+                cmd.arg("--unshare-net");
+            }
+            cmd.arg(interpreter).arg(&script_full_path).arg(arguments);
+            cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+            for (key, value) in &self.execution_config.env_vars { cmd.env(key, value); }
 
-        // Capture stdout/stderr
-        cmd.stdout(std::process::Stdio::piped())
-           .stderr(std::process::Stdio::piped());
-           
-        // Environment variables
-        for (key, value) in &self.execution_config.env_vars {
-            cmd.env(key, value);
-        }
+            let child = cmd.spawn()
+                .map_err(|e| Error::ToolExecution { 
+                    tool_name: self.name(), 
+                    message: format!("Failed to spawn process: {}", e) 
+                })?;
 
-        // Set timeout
-        let timeout = std::time::Duration::from_secs(self.execution_config.timeout_secs);
-        
-        // Execute with timeout
-        let child = cmd.spawn()
-            .map_err(|e| Error::ToolExecution { 
-                tool_name: self.name(), 
-                message: format!("Failed to spawn process: {}", e) 
-            })?;
-
-        let output = tokio::time::timeout(timeout, child.wait_with_output())
-            .await
-            .map_err(|_| Error::ToolExecution { 
-                tool_name: self.name(), 
-                message: "Execution timed out".to_string() 
-            })?
-            .map_err(|e| Error::ToolExecution { 
-                tool_name: self.name(), 
-                message: format!("Process failed: {}", e) 
-            })?;
+            tokio::time::timeout(timeout, child.wait_with_output())
+                .await
+                .map_err(|_| Error::ToolExecution { 
+                    tool_name: self.name(), 
+                    message: "Execution timed out".to_string() 
+                })?
+                .map_err(|e| Error::ToolExecution { 
+                    tool_name: self.name(), 
+                    message: format!("Process failed: {}", e) 
+                })?
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -277,8 +279,8 @@ impl Tool for DynamicSkill {
                     output.status.code().unwrap_or(-1), stdout, stderr)
             }.into());
         }
-        
-        // 🛡️ Safety Check: Parse for Proposals (unchanged logic)
+
+        // 🛡️ Safety Check: Parse for Proposals (Trading logic)
         #[cfg(feature = "trading")]
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&stdout) {
             if value.get("type").and_then(|t| t.as_str()) == Some("proposal") {
@@ -290,7 +292,7 @@ impl Tool for DynamicSkill {
 
                     if let Some(ref rm) = self.risk_manager {
                         let context = crate::trading::risk::TradeContext {
-                            user_id: "default_user".to_string(), // In production, this should come from agent config
+                            user_id: "default_user".to_string(), 
                             from_token: proposal.from_token.clone(),
                             to_token: proposal.to_token.clone(),
                             amount_usd: proposal.amount_usd,
@@ -299,43 +301,29 @@ impl Tool for DynamicSkill {
                             is_flagged: false,
                         };
 
-                        // 1. Check Risk
                         rm.check_and_reserve(&context).await
                             .map_err(|e| Error::tool_execution(self.name(), format!("Risk Check Denied: {}", e)))?;
 
-                        info!("Risk check approved for skill {}", self.name());
-
-                        // 2. Execute Action
                         if let Some(ref executor) = self.executor {
-                             // Map Proposal to Action::Swap
                              let action = Action::Swap {
                                  from_token: proposal.from_token,
                                  to_token: proposal.to_token,
                                  amount: proposal.amount,
                              };
-                             
                              let pipeline_ctx = crate::trading::pipeline::Context::new(format!("Skill execution: {}", self.name()));
-                             // We could pass more context if needed
-                             
                              let result = match executor.execute(&action, &pipeline_ctx).await {
                                 Ok(res) => res,
                                 Err(e) => {
-                                    // Fix #2.2: Rollback on Execution Failure
                                     warn!("Skill execution failed, rolling back risk reservation: {}", e);
                                     rm.rollback_trade(&context.user_id, context.amount_usd).await;
                                     return Err(Error::tool_execution(self.name(), format!("Execution Failed (Rolled Back): {}", e)).into());
                                 }
                              };
-                                
-                             // Once executed success, we confirm the trade to RiskManager (commit)
                              rm.commit_trade(&context.user_id, context.amount_usd).await?;
-                             
                              return Ok(format!("SUCCESS: Trade executed: {}", result));
                         } else {
-                            // Simulation Mode (Legacy behavior)
-                            // Still commit the risk usage as "Paper Trading"
                             rm.commit_trade(&context.user_id, context.amount_usd).await?;
-                            return Ok(format!("SIMULATION SUCCESS: Trade approved by risk manager but NO EXECUTOR configured. Proposal: {:?}", proposal));
+                            return Ok(format!("SIMULATION SUCCESS: Trade approved but NO EXECUTOR configured. Proposal: {:?}", proposal));
                         }
                     } else {
                         return Err(Error::tool_execution(self.name(), "RiskManager not configured, cannot execute risky proposal".to_string()).into());
@@ -351,7 +339,7 @@ impl Tool for DynamicSkill {
 /// Registry and loader for dynamic skills
 pub struct SkillLoader {
     pub skills: DashMap<String, Arc<DynamicSkill>>,
-    base_path: PathBuf,
+    pub base_path: PathBuf,
     #[cfg(feature = "trading")]
     risk_manager: Option<Arc<RiskManager>>,
     #[cfg(feature = "trading")]
@@ -458,8 +446,48 @@ impl SkillLoader {
              return Err(Error::Internal("SKILL.md must start with ---".to_string()));
         }
 
-        let metadata: SkillMetadata = serde_yaml_ng::from_str(yaml_str)
+        let mut metadata: SkillMetadata = serde_yaml_ng::from_str(yaml_str)
             .map_err(|e| Error::Internal(format!("Failed to parse Skill YAML: {}", e)))?;
+        
+        // --- 兼容性提升: 自动推断缺失的元数据 ---
+        // 如果 frontmatter 缺失 script 或 runtime，尝试从 Markdown 正文中解析
+        if metadata.script.is_none() || metadata.runtime.is_none() {
+            // 查找常见的脚本执行模式，例如: ```bash \n python3 .../scripts/xxx.py \n ```
+            // 或者直接查找 scripts/ 目录下的第一个文件
+            if metadata.script.is_none() {
+                let scripts_dir = path.join("scripts");
+                if scripts_dir.exists() {
+                    if let Ok(mut entries) = std::fs::read_dir(scripts_dir) {
+                        if let Some(Ok(first_entry)) = entries.next() {
+                            let filename = first_entry.file_name().to_string_lossy().to_string();
+                            metadata.script = Some(filename.clone());
+                            
+                            // 根据后缀推断 runtime
+                            if metadata.runtime.is_none() {
+                                if filename.ends_with(".py") {
+                                    metadata.runtime = Some("python3".into());
+                                } else if filename.ends_with(".js") {
+                                    metadata.runtime = Some("node".into());
+                                } else if filename.ends_with(".sh") {
+                                    metadata.runtime = Some("bash".into());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 如果还是没找到，尝试从代码块中解析执行指令
+            if metadata.runtime.is_none() {
+                if instructions.contains("python3") {
+                    metadata.runtime = Some("python3".into());
+                } else if instructions.contains("node") {
+                    metadata.runtime = Some("node".into());
+                } else if instructions.contains("bash") || instructions.contains("sh ") {
+                    metadata.runtime = Some("bash".into());
+                }
+            }
+        }
         
         Ok(DynamicSkill::new(metadata, instructions, path.to_path_buf()))
     }
@@ -468,8 +496,21 @@ impl SkillLoader {
 #[async_trait::async_trait]
 impl ContextInjector for SkillLoader {
     async fn inject(&self) -> Result<Vec<Message>> {
-        // Redundant - ToolSet now handles tool definitions in TS style
-        Ok(Vec::new())
+        if self.skills.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut content = String::from("## Available Skills\n\n");
+        content.push_str("You have the following skills available via `read_skill_manual`:\n\n");
+
+        for skill_ref in self.skills.iter() {
+            let skill = skill_ref.value();
+            content.push_str(&format!("- **{}**: {}\n", skill.name(), skill.metadata.description));
+        }
+
+        content.push_str("\nUse `read_skill_manual(skill_name)` to see full instructions for any skill.\n");
+
+        Ok(vec![Message::system(content)])
     }
 }
 
@@ -507,6 +548,7 @@ impl Tool for ReadSkillDoc {
             parameters_ts: Some("interface ReadSkillArgs {\n  skill_name: string; // The name of the skill to read manual for\n}".to_string()),
             is_binary: false,
             is_verified: true,
+            usage_guidelines: None,
         }
     }
 
@@ -568,6 +610,7 @@ impl Tool for ClawHubTool {
             parameters_ts: Some("interface ClawHubArgs {\n  action: 'search' | 'install';\n  query: string; // Search query or skill slug\n  manager?: 'npm' | 'pnpm' | 'bun'; // Package manager (default: npm)\n}".to_string()),
             is_binary: false,
             is_verified: true,
+            usage_guidelines: None,
         }
     }
 

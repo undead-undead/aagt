@@ -38,13 +38,7 @@ impl Provider for MockProvider {
 
     async fn stream_completion(
         &self,
-        _model: &str,
-        _system_prompt: Option<&str>,
-        _messages: Vec<Message>,
-        _tools: Vec<ToolDefinition>,
-        _temperature: Option<f64>,
-        _max_tokens: Option<u64>,
-        _extra_params: Option<serde_json::Value>,
+        _request: aagt_core::agent::provider::ChatRequest,
     ) -> Result<StreamingResponse> {
         let fail = *self.should_fail.lock().unwrap();
         if fail {
@@ -78,27 +72,31 @@ async fn main() -> Result<()> {
         request_timeout: Duration::from_secs(1),
     };
 
-    let resilient_provider = aagt_core::provider::ResilientProvider::new(
+    let resilient_provider = aagt_core::agent::provider::ResilientProvider::new(
         primary.clone(),
         fallback.clone(),
         config
     );
 
-    let messages = vec![Message::user("test")];
-
+    let request = aagt_core::agent::provider::ChatRequest {
+        model: "model".to_string(),
+        messages: vec![Message::user("test")],
+        ..Default::default()
+    };
+    
     // 1. First Failure (Primary)
     println!("\nRequest 1 (Expect Primary Fail):");
-    let _ = resilient_provider.stream_completion("model", None, messages.clone(), vec![], None, None, None).await?;
+    let _ = resilient_provider.stream_completion(request.clone()).await?;
     // Note: ResilientProvider falls back immediately on failure, so this call should succeed via Fallback!
 
     // 2. Second Failure (Primary) -> Circuit Should Open
     println!("\nRequest 2 (Expect Primary Fail -> Open Circuit):");
-    let _ = resilient_provider.stream_completion("model", None, messages.clone(), vec![], None, None, None).await?;
+    let _ = resilient_provider.stream_completion(request.clone()).await?;
     
     // 3. Third Request -> Circuit is Open, should skip Primary immediately and use Fallback
     println!("\nRequest 3 (Expect Skip Primary):");
     primary.set_fail(false); // Fix primary, but circuit is OPEN so it shouldn't be called yet
-    let _ = resilient_provider.stream_completion("model", None, messages.clone(), vec![], None, None, None).await?;
+    let _ = resilient_provider.stream_completion(request.clone()).await?;
 
     // 4. Wait for Half-Open
     println!("\nWaiting for Reset Timeout...");
@@ -106,7 +104,7 @@ async fn main() -> Result<()> {
 
     // 5. Fourth Request -> Half-Open, should try Primary (which is now fixed)
     println!("\nRequest 4 (Expect Primary Success -> Close Circuit):");
-    let resp = resilient_provider.stream_completion("model", None, messages.clone(), vec![], None, None, None).await?;
+    let resp = resilient_provider.stream_completion(request).await?;
     
     // Verify response comes from Primary
     use futures::StreamExt;

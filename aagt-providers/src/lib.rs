@@ -14,6 +14,7 @@ pub use aagt_core::error::{Error, Result};
 pub use aagt_core::skills::tool::ToolDefinition;
 
 pub mod mock;
+pub use mock::MockProvider;
 pub mod utils;
 
 #[cfg(feature = "openai")]

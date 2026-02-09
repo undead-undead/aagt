@@ -41,10 +41,14 @@ impl Tool for WriteNote {
                 },
                 "required": ["filename", "content"]
             }),
+            is_binary: false,
+            is_verified: false,
+            parameters_ts: None,
+            usage_guidelines: None,
         }
     }
 
-    async fn call(&self, arguments: &str) -> Result<String> {
+    async fn call(&self, arguments: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
             filename: String,
@@ -60,7 +64,7 @@ impl Tool for WriteNote {
         
         // Security check: simple path traversal prevention
         if filename.contains("..") || filename.starts_with('/') {
-            return Err(Error::tool_execution("write_note".to_string(), "Invalid filename. Use relative paths only.".to_string()));
+            return Err(Error::tool_execution("write_note".to_string(), "Invalid filename. Use relative paths only.".to_string()).into());
         }
 
         let path = Path::new("memory").join(&filename);

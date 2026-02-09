@@ -204,6 +204,7 @@ impl Provider for Anthropic {
             temperature,
             max_tokens,
             extra_params: _,
+            enable_cache_control: _,
         } = request;
 
         let anthropic_request = AnthropicRequest {
@@ -398,6 +399,10 @@ mod tests {
             name: "test".to_string(),
             description: "A test tool".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            is_binary: false,
+            is_verified: false,
+            parameters_ts: None,
+            usage_guidelines: None,
         }];
 
         let converted = Anthropic::convert_tools(tools);

@@ -2,8 +2,8 @@
 //!
 //! # Example
 //!
-//! ```rust
-//! use aagt_core::logging::init_logging;
+//! ```rust,no_run
+//! use aagt_core::infra::logging::init_logging;
 //!
 //! init_logging("logs", "agent.log", "info").unwrap();
 //! ```
